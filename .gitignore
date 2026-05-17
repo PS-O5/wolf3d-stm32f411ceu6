@@ -1,0 +1,77 @@
+# -----------------------------------------------------------------------------
+# C/C++ Build Outputs
+# -----------------------------------------------------------------------------
+# Ignore CMake generated folders and build artifacts
+build/
+out/
+bin/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+
+# Simulator Executables (Windows/Linux/Mac)
+*.exe
+*.out
+*.app
+
+# STM32 Bare-Metal Binaries
+*.elf
+*.bin
+*.hex
+*.map
+
+# -----------------------------------------------------------------------------
+# Python Asset Extractor Outputs
+# -----------------------------------------------------------------------------
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+
+# Ignore the debug PNGs generated for sprite verification
+sprites_png/
+
+# -----------------------------------------------------------------------------
+# Original Game Assets (Copyright Protection)
+# -----------------------------------------------------------------------------
+# DO NOT commit the original id Software game data files!
+*.WL1
+*.WL6
+*.SDM
+*.SOD
+*.pk3
+VSWAP.*
+GAMEMAPS.*
+MAPHEAD.*
+AUDIO.*
+VGADICT.*
+VGAHEAD.*
+VGAGRAPH.*
+
+# -----------------------------------------------------------------------------
+# OS & IDE Files
+# -----------------------------------------------------------------------------
+# VS Code
+.vscode/
+*.code-workspace
+
+# CLion / JetBrains
+.idea/
+cmake-build-*/
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
