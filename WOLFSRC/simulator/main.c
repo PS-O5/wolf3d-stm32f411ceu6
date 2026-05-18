@@ -61,6 +61,38 @@ const uint8_t font_num_3x5[10][5] = {
     {0x7, 0x5, 0x7, 0x1, 0x7}  // 9
 };
 
+// 3x5 Alphabet Font (A-Z) - 130 Bytes
+const uint8_t font_alpha_3x5[26][5] = {
+    {0x2,0x5,0x7,0x5,0x5}, // A
+    {0x6,0x5,0x6,0x5,0x6}, // B
+    {0x3,0x4,0x4,0x4,0x3}, // C
+    {0x6,0x5,0x5,0x5,0x6}, // D
+    {0x7,0x4,0x6,0x4,0x7}, // E
+    {0x7,0x4,0x6,0x4,0x4}, // F
+    {0x3,0x4,0x5,0x5,0x3}, // G
+    {0x5,0x5,0x7,0x5,0x5}, // H
+    {0x7,0x2,0x2,0x2,0x7}, // I
+    {0x1,0x1,0x1,0x5,0x2}, // J
+    {0x5,0x5,0x6,0x5,0x5}, // K
+    {0x4,0x4,0x4,0x4,0x7}, // L
+    {0x5,0x7,0x5,0x5,0x5}, // M 
+    {0x6,0x5,0x5,0x5,0x5}, // N 
+    {0x2,0x5,0x5,0x5,0x2}, // O
+    {0x6,0x5,0x6,0x4,0x4}, // P
+    {0x2,0x5,0x5,0x6,0x3}, // Q
+    {0x6,0x5,0x6,0x5,0x5}, // R
+    {0x3,0x4,0x2,0x1,0x6}, // S
+    {0x7,0x2,0x2,0x2,0x2}, // T
+    {0x5,0x5,0x5,0x5,0x7}, // U
+    {0x5,0x5,0x5,0x2,0x2}, // V
+    {0x5,0x5,0x5,0x7,0x5}, // W
+    {0x5,0x5,0x2,0x5,0x5}, // X
+    {0x5,0x5,0x2,0x2,0x2}, // Y
+    {0x7,0x1,0x2,0x4,0x7}  // Z
+};
+
+
+
 // 1D Z-buffer for sprite depth clipping
 int32_t z_buffer[RENDER_WIDTH];
 
@@ -88,6 +120,7 @@ Sprite sprites[NUM_WORLD_SPRITES] = {
 
 int player_ammo = 8;
 int player_health = 100;
+int damage_flash = 0;
 
 // ─── PALETTE ─────────────────────────────────────────────────────────────────
 // BUG 2 FIX: SDL2 on x86 (little-endian) with SDL_PIXELFORMAT_BGR565 wants
@@ -232,6 +265,15 @@ void draw_weapon(void) {
     // Verified against VSWAP.WL1: pistol idle = relative index 315.
     int weapon_tex_id = 421;
 
+    // Swap textures based on the cooldown timer to animate the recoil
+    if (weapon_frame > 10) {
+        weapon_tex_id = 421; // Firing flash frame
+    } else if (weapon_frame > 5) {
+        weapon_tex_id = 422; // Gun recoiling upward
+    } else if (weapon_frame > 0) {
+        weapon_tex_id = 423; // Gun returning to center
+    }
+
     if (weapon_frame > 0) {
         start_y += 4;
         weapon_tex_id += 1; // firing frame
@@ -374,8 +416,15 @@ void render_frame(void) {
         int map_x = FX2INT(pos_x);
         int map_y = FX2INT(pos_y);
 
-        int32_t delta_dist_x = (ray_dir_x == 0) ? INT2FX(1000) : ABS(FX_DIV(INT2FX(1), ray_dir_x));
-        int32_t delta_dist_y = (ray_dir_y == 0) ? INT2FX(1000) : ABS(FX_DIV(INT2FX(1), ray_dir_y));
+        //Prevent fixed-point overflow when dividing by near-zero ray directions
+        float f_ray_x = (float)ray_dir_x / 65536.0f;
+        float f_ray_y = (float)ray_dir_y / 65536.0f;
+        
+        int32_t delta_dist_x = (ray_dir_x == 0) ? INT2FX(1000) : FLT2FX(fabs(1.0f / f_ray_x));
+        int32_t delta_dist_y = (ray_dir_y == 0) ? INT2FX(1000) : FLT2FX(fabs(1.0f / f_ray_y));
+
+        //int32_t delta_dist_x = (ray_dir_x == 0) ? INT2FX(1000) : ABS(FX_DIV(INT2FX(1), ray_dir_x));
+        //int32_t delta_dist_y = (ray_dir_y == 0) ? INT2FX(1000) : ABS(FX_DIV(INT2FX(1), ray_dir_y));
 
         int32_t side_dist_x, side_dist_y;
         int step_x, step_y;
@@ -389,6 +438,13 @@ void render_frame(void) {
         while (!hit) {
             if (side_dist_x < side_dist_y) { side_dist_x += delta_dist_x; map_x += step_x; side = 0; }
             else                            { side_dist_y += delta_dist_y; map_y += step_y; side = 1; }
+
+            // Prevents rays from flying off the map into garbage memory
+            if (map_x < 0 || map_x >= 64 || map_y < 0 || map_y >= 64) {
+                hit = 1; 
+                tile_hit = 1; // Default to a standard wall
+                break;
+            }
 
             tile_hit = get_map_tile(map_x, map_y);
 
@@ -459,11 +515,43 @@ void render_frame(void) {
         int32_t step    = FX_DIV(INT2FX(64), INT2FX(line_height));
         int32_t tex_pos = FX_MUL(INT2FX(draw_start - RENDER_HEIGHT / 2 + line_height / 2), step);
 
+        // Strict bounds clamping to prevent array out-of-bounds (ghost strips)
+        if (tex_x < 0) tex_x = 0;
+        if (tex_x > 63) tex_x = 63;
+
         z_buffer[x] = perp_wall_dist;
         for (int y = draw_start; y < draw_end; y++) {
             int tex_y = FX2INT(tex_pos) & 63;
             tex_pos += step;
             frame_buffer_8bit[y * RENDER_WIDTH + x] = wall_textures[tex_num][tex_x * 64 + tex_y];
+        }
+    }
+}
+
+// Unified text drawing function
+void draw_mini_string(int x, int y, const char* str, uint8_t color_idx) {
+    for (int i = 0; str[i] != '\0'; i++) {
+        char c = str[i];
+        if (c == ' ') continue; 
+        
+        const uint8_t* bitmap = NULL;
+        
+        if (c >= '0' && c <= '9')      bitmap = font_num_3x5[c - '0'];
+        else if (c >= 'A' && c <= 'Z') bitmap = font_alpha_3x5[c - 'A'];
+        
+        if (bitmap) {
+            for (int row = 0; row < 5; row++) {
+                uint8_t bits = bitmap[row];
+                for (int col = 0; col < 3; col++) {
+                    if (bits & (1 << (2 - col))) {
+                        int px = x + (i * 4) + col; 
+                        int py = y + row;
+                        if (px >= 0 && px < RENDER_WIDTH && py >= 0 && py < RENDER_HEIGHT) {
+                            frame_buffer_8bit[py * RENDER_WIDTH + px] = color_idx;
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -492,24 +580,54 @@ char str[16];
     }
 }
 
+void draw_damage_flash(void) {
+    if (damage_flash > 0) {
+        int viewport_height = RENDER_HEIGHT - 15; // Don't tint the HUD
+        for (int y = 0; y < viewport_height; y++) {
+            for (int x = 0; x < RENDER_WIDTH; x++) {
+                // Fast checkerboard pattern for pseudo-transparency
+                if ((x + y) % 2 == 0) {
+                    frame_buffer_8bit[y * RENDER_WIDTH + x] = 40; // 40 = red
+                }
+            }
+        }
+        damage_flash--;
+    }
+}
 
 void draw_hud(void) {
-    int hud_start_y = RENDER_HEIGHT - 15; // Shrunk to 10 pixels
+    int hud_height = 15;
+    int hud_start_y = RENDER_HEIGHT - hud_height;
     
-    // Draw background
+    // 1. Draw solid blue background
     for (int y = hud_start_y; y < RENDER_HEIGHT; y++) {
-        memset(&frame_buffer_8bit[y * RENDER_WIDTH], 3, RENDER_WIDTH); 
+        memset(&frame_buffer_8bit[y * RENDER_WIDTH], 3, RENDER_WIDTH); // 3 = dark blue
     }
 
-    // Top border
+    // 2. Top border
     for (int x = 0; x < RENDER_WIDTH; x++) {
-        frame_buffer_8bit[hud_start_y * RENDER_WIDTH + x] = 0;
+        frame_buffer_8bit[hud_start_y * RENDER_WIDTH + x] = 0; // Black
+        frame_buffer_8bit[(hud_start_y + 1) * RENDER_WIDTH + x] = 2; // Gray highlight
     }
 
-    // Draw the mini readouts
-    draw_number(10, hud_start_y + 3, player_health, 15);
-    draw_number(130, hud_start_y + 3, player_ammo, 15);
+    // 3. Draw Clean Centered Readouts
+    // Floor
+    draw_mini_string(10, hud_start_y + 2, "LVL", 15);
+    draw_number(15, hud_start_y + 10, 1, 15);
+    
+    // Score
+    draw_mini_string(45, hud_start_y + 2, "SCORE", 15);
+    draw_number(50, hud_start_y + 10, 0, 15); 
+    
+    // Health
+    draw_mini_string(90, hud_start_y + 2, "HEALTH", 15);
+    draw_number(95, hud_start_y + 10, player_health, 15);
+    
+    // Ammo
+    draw_mini_string(130, hud_start_y + 2, "AMMO", 15);
+    draw_number(135, hud_start_y + 10, player_ammo, 15);
 }
+
 
 // ─── UPSCALE & PUSH ──────────────────────────────────────────────────────────
 // BUG 4 FIX: original loop iterated src_x over RENDER_WIDTH but wrote into
@@ -537,12 +655,27 @@ void update_world(void) {
     for (int i = 0; i < NUM_WORLD_SPRITES; i++) {
         if (!sprites[i].active) continue;
 
-        if (sprites[i].type == 1) {
-            if (ABS(pos_x - sprites[i].x) < pickup_radius &&
-                ABS(pos_y - sprites[i].y) < pickup_radius) {
-                sprites[i].active = 0;
-                player_ammo += 8;
-                printf("Picked up ammo! Total: %d\n", player_ammo);
+        // Item Pickup Logic
+        if (sprites[i].type == 1 && sprites[i].active) { // Type 1 = Item
+            int32_t dist_x = ABS(pos_x - sprites[i].x);
+            int32_t dist_y = ABS(pos_y - sprites[i].y);
+            
+            // Player touches the item
+            if (dist_x < FLT2FX(0.4f) && dist_y < FLT2FX(0.4f)) {
+                
+                if (sprites[i].texture_id == 27) { // Medkit
+                    if (player_health < 100) {     // Only pick up if we need it!
+                        player_health += 25;
+                        printf("Medkit Picked!");
+                        if (player_health > 100) player_health = 100; // Cap at 100
+                        sprites[i].active = 0;     // Consume item
+                    }
+                } 
+                else if (sprites[i].texture_id == 28) { // Ammo
+                    player_ammo += 8;
+                    printf("Ammo Picked!");
+                    sprites[i].active = 0;         // Consume item
+                }
             }
         }
 
@@ -562,7 +695,8 @@ void update_world(void) {
                 int walk_frames[4] = {50, 58, 66, 74};
                 sprites[i].texture_id = walk_frames[(sprites[i].tick / 10) % 4]; 
 
-                if (ABS(dx) > FLT2FX(1.5f) || ABS(dy) > FLT2FX(1.5f)) {
+                // Enemy Detection Range
+                if (ABS(dx) > FLT2FX(2.0f) || ABS(dy) > FLT2FX(2.0f)) {
                     int32_t step_x = (dx > 0) ? enemy_speed : -enemy_speed;
                     int32_t step_y = (dy > 0) ? enemy_speed : -enemy_speed;
 
@@ -586,6 +720,7 @@ void update_world(void) {
                 if (sprites[i].tick == 15) {
                     printf("Guard shoots you!\n");
                     player_health -= 10;
+                    damage_flash = 10;   //Feedback for getting shot!
                 }
                 if (sprites[i].tick > 30) {
                     sprites[i].state = 1; // Back to chase
@@ -606,6 +741,30 @@ void update_world(void) {
     }
 }
 
+void reset_game(void) {
+    // Reset Camera & Stats
+    pos_x = FLT2FX(57.5f);
+    pos_y = FLT2FX(37.5f);
+    dir_x = FLT2FX(0.0f);
+    dir_y = FLT2FX(-1.0f);
+    plane_x = FLT2FX(0.66f);
+    plane_y = FLT2FX(0.0f);
+    player_health = 100;
+    player_ammo = 8;
+    weapon_frame = 0;
+
+    // Reset Doors
+    memset(door_state, 0, sizeof(door_state));
+    memset(door_timer, 0, sizeof(door_timer));
+    memset(door_offset, 0, sizeof(door_offset));
+
+    // Respawn Entities (Adjust these coordinates if your map layout is different!)
+    sprites[0] = (Sprite){ FLT2FX(57.5f), FLT2FX(36.0f), 28, 1, 1, 0,  0, 0 }; // Ammo
+    sprites[1] = (Sprite){ FLT2FX(57.5f), FLT2FX(34.5f),  3, 0, 1, 0,  0, 0 }; // Barrel
+    sprites[2] = (Sprite){ FLT2FX(56.5f), FLT2FX(36.0f), 27, 1, 1, 0,  0, 0 }; // Medkit
+    sprites[3] = (Sprite){ FLT2FX(57.5f), FLT2FX(31.5f), 50, 2, 1, 0, 25, 0 }; // Guard
+}
+
 // ─── MAIN ────────────────────────────────────────────────────────────────────
 int main(int argc __attribute__((unused)), char *argv[] __attribute__((unused))) {
     SDL_Init(SDL_INIT_VIDEO);
@@ -624,9 +783,11 @@ int main(int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
 
     init_vga_palette();
 
-    int32_t move_speed = FLT2FX(0.1f);
-    float   rot_speed  = 0.05f;
+    int32_t move_speed = FLT2FX(0.065f);
+    float   rot_speed  = 0.035f;
     int running = 1;
+    int game_state = 0;
+    int death_fade = 0;
 
     while (running) {
         SDL_Event event;
@@ -634,7 +795,66 @@ int main(int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
             if (event.type == SDL_QUIT) running = 0;
         }
 
+
         const Uint8 *keys = SDL_GetKeyboardState(NULL);
+       
+        // --- DEATH SCREEN LOOP OVERRIDE ---
+        if (game_state == 1) {
+            
+            // 1. The Pixel Dissolve Effect
+            if (death_fade < 255) {
+                // Randomly turn ~15% of the pixels red every frame.
+                // Because we aren't clearing the buffer, the red accumulates!
+                for (int i = 0; i < RENDER_WIDTH * RENDER_HEIGHT; i++) {
+                    if (rand() % 100 < 15) {
+                        frame_buffer_8bit[i] = 40; // Red
+                    }
+                }
+                death_fade += 10; // Controls how fast the dissolve finishes
+            } 
+            // 2. The Final Text Screen
+            else {
+                // Ensure it's completely solid red behind the text
+                memset(frame_buffer_8bit, 40, RENDER_WIDTH * RENDER_HEIGHT); 
+                draw_mini_string(70, 50, "DEATH", 15);
+                draw_mini_string(38, 70, "PRESS OPEN TO RESTART", 15);
+            }
+
+            upscale_and_push_frame();
+            SDL_UpdateTexture(texture, NULL, dma_tft_buffer, TFT_WIDTH * sizeof(uint16_t));
+            SDL_RenderClear(renderer);
+            SDL_RenderCopy(renderer, texture, NULL, NULL);
+            SDL_RenderPresent(renderer);
+
+            // 3. Only allow restart IF the fade animation has finished
+            if (keys[SDL_SCANCODE_SPACE] && death_fade >= 255) {
+                reset_game();   
+                game_state = 0; 
+            }
+            
+            SDL_Delay(16);
+            continue; 
+        }
+
+
+        // Check for Player Death
+        if (player_health <= 0) {
+            printf("YOU DIED!\n");
+            
+            // Fill screen with dark red (Color index 40 is usually red in Wolf palette)
+            memset(frame_buffer_8bit, 40, RENDER_WIDTH * RENDER_HEIGHT);
+            upscale_and_push_frame();
+            
+            SDL_UpdateTexture(texture, NULL, dma_tft_buffer, TFT_WIDTH * sizeof(uint16_t));
+            SDL_RenderClear(renderer);
+            SDL_RenderCopy(renderer, texture, NULL, NULL);
+            SDL_RenderPresent(renderer);
+           
+            death_fade = 0;
+            game_state = 1;     // End the game loop
+            continue;
+        }
+
 
         // Bob only while moving
         if (keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_S] ||
@@ -651,7 +871,7 @@ int main(int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
             if (is_passable(pos_x, pos_y - FX_MUL(dir_y, move_speed))) pos_y -= FX_MUL(dir_y, move_speed);
         }
 
-        // BUG 3 FIX: A/D were mapped to opposite rotation directions AND
+        // A/D were mapped to opposite rotation directions AND
         // wrongly paired with LEFT/RIGHT arrow keys.
         // Correct Wolf3D convention: Left arrow / A = rotate left (counter-clockwise)
         //                           Right arrow / D = rotate right (clockwise)
@@ -672,43 +892,66 @@ int main(int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
             plane_y = FLT2FX(fpx * sin(rot_speed) + fpy * cos(rot_speed));
         }
 
-        // Shoot
-        if (keys[SDL_SCANCODE_Z] && weapon_frame == 0) {
-            if (player_ammo > 0) {
-                weapon_frame = 10;
-                player_ammo--;
-                printf("BANG! Ammo: %d\n", player_ammo);
+        // Shooting Logic
+        // Tick the weapon cooldown timer
+        if (weapon_frame > 0) {
+            weapon_frame--;
+        }
+        else if (weapon_frame < 0) {
+            weapon_frame++; // Tick negative cooldowns back to 0
+        }
 
-                for (int i = 0; i < NUM_WORLD_SPRITES; i++) {
-                    if (!sprites[i].active || sprites[i].type != 2 || sprites[i].state == 2) continue;
+        // 2. Firing Logic
+        if (keys[SDL_SCANCODE_Z]) {
+            if (weapon_frame == 0) {
+                if (player_ammo > 0) {
+                    player_ammo--;
+                    weapon_frame = 30; // Set cooldown
 
-                    int32_t sx = sprites[i].x - pos_x;
-                    int32_t sy = sprites[i].y - pos_y;
+                    // Calculate local camera matrix for targeting
                     int32_t det = FX_MUL(plane_x, dir_y) - FX_MUL(dir_x, plane_y);
-                    if (det == 0) continue;
-                    int32_t inv_det = FX_DIV(INT2FX(1), det);
+                    int32_t local_inv_det = (det == 0) ? 0 : FX_DIV(INT2FX(1), det);
 
-                    int32_t transform_x = FX_MUL(inv_det,  FX_MUL(dir_y,   sx) - FX_MUL(dir_x,   sy));
-                    int32_t transform_y = FX_MUL(inv_det, -FX_MUL(plane_y, sx) + FX_MUL(plane_x, sy));
+                    int closest_target = -1;
+                    int32_t closest_dist = 0x7FFFFFFF; // Max 32-bit int
 
-                    if (transform_y <= 0) continue;
+                    // Scan for targets
+                    for (int i = 0; i < NUM_WORLD_SPRITES; i++) {
+                        if (sprites[i].type == 2 && sprites[i].state != 2 && sprites[i].active) {
+                            
+                            int32_t dx = sprites[i].x - pos_x;
+                            int32_t dy = sprites[i].y - pos_y;
+                            int32_t transform_y = FX_MUL(local_inv_det, -FX_MUL(plane_y, dx) + FX_MUL(plane_x, dy));
+                            
+                            if (transform_y > 0) {
+                                int32_t transform_x = FX_MUL(local_inv_det, FX_MUL(dir_y, dx) - FX_MUL(dir_x, dy));
+                                int32_t screen_ratio = FX_DIV(transform_x, transform_y);
+                                int ssx = (RENDER_WIDTH / 2) + FX2INT(FX_MUL(INT2FX(RENDER_WIDTH / 2), screen_ratio));
 
-                    int32_t screen_ratio = FX_DIV(transform_x, transform_y);
-                    int ssx = (RENDER_WIDTH / 2) + FX2INT(FX_MUL(INT2FX(RENDER_WIDTH / 2), screen_ratio));
-
-                    if (ssx > RENDER_WIDTH / 2 - 30 && ssx < RENDER_WIDTH / 2 + 30) {
-                        sprites[i].health -= 25;
-                        if (sprites[i].health <= 0) { 
-                            sprites[i].state = 2; 
-                            sprites[i].tick = 0; // CRITICAL: Reset the timer!
-                            printf("Guard down!\n"); 
-                        } else {
-                            printf("Guard hit!\n");
+                                // Hitbox check: Is the guard in the center of the screen?
+                                if (ssx > RENDER_WIDTH / 2 - 30 && ssx < RENDER_WIDTH / 2 + 30) {
+                                    // Make sure we only shoot the closest guard in the line of fire
+                                    if (transform_y < closest_dist) {
+                                        closest_dist = transform_y;
+                                        closest_target = i;
+                                    }
+                                }
+                            }
                         }
                     }
+
+                    // Apply damage to the confirmed target
+                    if (closest_target != -1) {
+                        sprites[closest_target].health -= 25;
+                        if (sprites[closest_target].health <= 0) { 
+                            sprites[closest_target].state = 2; 
+                            sprites[closest_target].tick = 0; // Trigger death animation
+                        }
+                    }
+                } else {
+                    printf("Click. Out of ammo.\n");
+                    weapon_frame = -15; 
                 }
-            } else {
-                printf("Click. Out of ammo.\n");
             }
         }
 
@@ -720,6 +963,7 @@ int main(int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
         render_frame();
         draw_sprites();
         draw_weapon();
+        draw_damage_flash(); 
         draw_hud();
         upscale_and_push_frame();
 
