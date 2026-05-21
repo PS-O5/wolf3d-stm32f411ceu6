@@ -1,0 +1,747 @@
+/*
+ * hw_f411.h — Phase 2 Bare-Metal Hardware Layer
+ * Target : STM32F411CEU6 (Black Pill), 25 MHz HSE → 100 MHz SYSCLK
+ * Display: ILI9341, 320×240, SPI1 @ 50 MHz, DMA2 Stream3 Channel3
+ *
+ * Pin map (all on GPIOA — zero cross-port register reads needed):
+ *   PA2  → RST  (GPIO output)
+ *   PA3  → DC   (GPIO output, Data/Command)
+ *   PA4  → CS   (GPIO output, active-low)
+ *   PA5  → SCK  (SPI1, AF5)
+ *   PA7  → MOSI (SPI1, AF5)
+ *
+ * Clock tree (RM0383 §6):
+ *   HSE  = 25 MHz
+ *   /M=25 → VCO_in = 1 MHz   (must be 1–2 MHz; 1 MHz chosen, stable)
+ *   ×N=400 → VCO_out = 400 MHz (must be 192–432 MHz ✓)
+ *   /P=4   → SYSCLK  = 100 MHz (F411 max ✓)
+ *   AHB /1 → HCLK    = 100 MHz
+ *   APB1/2 → PCLK1   = 50  MHz (max 50 MHz for APB1 ✓)
+ *   APB2/1 → PCLK2   = 100 MHz → SPI1 input = 100 MHz → BR=000 → 50 MHz SPI
+ *   Flash latency: 3WS (RM0383 Table 7, VOS Scale2, 90 < HCLK ≤ 100 MHz)
+ *
+ * DMA pipeline:
+ *   DMA2_Stream3_CH3 = SPI1_TX (RM0383 Table 28)
+ *   Transfer: Memory→Peripheral, 8-bit data, memory-increment
+ *   One call to lcd_dma_send_frame() blasts all 153,600 bytes with zero CPU.
+ *
+ * SysTick:
+ *   Reload = 100,000 − 1 → 1 ms tick at 100 MHz AHB
+ *   Used for delay_ms() and frame-rate cap (33 ms = ~30 fps).
+ *
+ * Usage in main.c:
+ *   #include "hw_f411.h"
+ *   // Replace SDL_Init / SDL_CreateWindow etc. with:
+ *   hw_init();          // RCC + GPIO + SPI + DMA + SysTick + ILI9341
+ *   // Game loop:
+ *   while (1) {
+ *       uint32_t t0 = systick_ms;
+ *       render_frame(); draw_sprites(); draw_weapon(); upscale_and_push_frame();
+ *       lcd_dma_send_frame();          // DMA push, blocks until done
+ *       while ((systick_ms - t0) < 33); // cap at 30 fps
+ *   }
+ *
+ * Buttons (optional — wire any GPIO, read via IDR):
+ *   See hw_buttons_read() at the bottom; default mapping is PB0-PB4.
+ */
+
+#pragma once
+#include <stdint.h>
+#include "stm32f4xx.h"    // This automatically pulls in stm32f411xe.h and core_cm4.h
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  CMSIS-lite peripheral structs
+ *  (include stm32f4xx.h from your toolchain instead if available)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+#ifdef USE_CMSIS_HEADERS
+#  include "stm32f411xe.h"
+#else
+/* ── Minimal register definitions so this file is self-contained ─────────── */
+#define PERIPH_BASE     0x40000000UL
+#define APB1PERIPH_BASE (PERIPH_BASE + 0x00000000UL)
+#define APB2PERIPH_BASE (PERIPH_BASE + 0x00010000UL)
+#define AHB1PERIPH_BASE (PERIPH_BASE + 0x00020000UL)
+
+/* SysTick (ARM core) */
+#define SCS_BASE        0xE000E000UL
+#define SYSTICK_BASE    (SCS_BASE + 0x0010UL)
+typedef struct { volatile uint32_t CTRL, LOAD, VAL, CALIB; } SysTick_Type;
+#define SysTick         ((SysTick_Type *)SYSTICK_BASE)
+
+/* Flash interface */
+#define FLASH_BASE      (APB2PERIPH_BASE + 0x23C00UL - 0x10000UL + 0x3C00UL)
+/* Correct base: 0x40023C00 */
+#undef  FLASH_BASE
+#define FLASH_BASE      0x40023C00UL
+typedef struct { volatile uint32_t ACR, KEYR, OPTKEYR, SR, CR, OPTCR; } FLASH_Type;
+#define FLASH           ((FLASH_Type *)FLASH_BASE)
+#define FLASH_ACR_LATENCY_3WS  0x00000003UL
+#define FLASH_ACR_PRFTEN       (1UL<<8)
+#define FLASH_ACR_ICEN         (1UL<<9)
+#define FLASH_ACR_DCEN         (1UL<<10)
+
+/* PWR */
+#define PWR_BASE        (APB1PERIPH_BASE + 0x7000UL)
+typedef struct { volatile uint32_t CR, CSR; } PWR_Type;
+#define PWR             ((PWR_Type *)PWR_BASE)
+
+/* RCC */
+#define RCC_BASE        (AHB1PERIPH_BASE + 0x3800UL)
+typedef struct {
+    volatile uint32_t CR, PLLCFGR, CFGR, CIR,
+                      AHB1RSTR, AHB2RSTR, _r0[2],
+                      APB1RSTR, APB2RSTR, _r1[2],
+                      AHB1ENR, AHB2ENR, _r2[2],
+                      APB1ENR, APB2ENR, _r3[2],
+                      AHB1LPENR, AHB2LPENR, _r4[2],
+                      APB1LPENR, APB2LPENR, _r5[2],
+                      BDCR, CSR, _r6[2],
+                      SSCGR, PLLI2SCFGR, _r7, DCKCFGR;
+} RCC_Type;
+#define RCC             ((RCC_Type *)RCC_BASE)
+
+/* GPIO */
+#define GPIOA_BASE      (AHB1PERIPH_BASE + 0x0000UL)
+#define GPIOB_BASE      (AHB1PERIPH_BASE + 0x0400UL)
+typedef struct {
+    volatile uint32_t MODER, OTYPER, OSPEEDR, PUPDR,
+                      IDR, ODR, BSRR, LCKR, AFR[2];
+} GPIO_Type;
+#define GPIOA           ((GPIO_Type *)GPIOA_BASE)
+#define GPIOB           ((GPIO_Type *)GPIOB_BASE)
+
+/* SPI */
+#define SPI1_BASE       (APB2PERIPH_BASE + 0x3000UL)
+typedef struct {
+    volatile uint32_t CR1, CR2, SR, DR, CRCPR, RXCRCR, TXCRCR, I2SCFGR, I2SPR;
+} SPI_Type;
+#define SPI1            ((SPI_Type *)SPI1_BASE)
+
+/* DMA2 */
+#define DMA2_BASE       (AHB1PERIPH_BASE + 0x6400UL)
+typedef struct {
+    volatile uint32_t LISR, HISR, LIFCR, HIFCR;
+} DMA_Type;
+typedef struct {
+    volatile uint32_t CR, NDTR, PAR, M0AR, M1AR, FCR;
+} DMA_Stream_Type;
+#define DMA2            ((DMA_Type       *)DMA2_BASE)
+#define DMA2_Stream3    ((DMA_Stream_Type*)(DMA2_BASE + 0x058UL))
+
+#endif /* USE_CMSIS_HEADERS */
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  DISPLAY GEOMETRY  (must match platform.h)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+#ifndef TFT_WIDTH
+#  define TFT_WIDTH  320
+#  define TFT_HEIGHT 240
+#endif
+
+/* Frame buffer lives in main.c — declared extern here */
+extern uint16_t dma_tft_buffer[TFT_WIDTH * TFT_HEIGHT];
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  SYSTICK
+ * ═══════════════════════════════════════════════════════════════════════════ */
+volatile uint32_t systick_ms = 0;   /* incremented every 1 ms by SysTick_Handler */
+
+/* SysTick ISR — place in main.c or a dedicated isr.c: */
+/*   void SysTick_Handler(void) { systick_ms++; }      */
+
+static inline void systick_init(void) {
+    /*
+     * SYSCLK = 100 MHz, AHB /1 → SysTick clock = 100 MHz.
+     * Reload for 1 ms tick: 100,000,000 / 1000 = 100,000 counts.
+     * LOAD register = count − 1.
+     */
+    SysTick->LOAD = 100000UL - 1UL;
+    SysTick->VAL  = 0UL;
+    /*
+     * CTRL bits:
+     *   [2] CLKSOURCE = 1  → processor clock (AHB, not /8)
+     *   [1] TICKINT   = 1  → assert SysTick exception on zero
+     *   [0] ENABLE    = 1  → counter enabled
+     */
+    SysTick->CTRL = 0x00000007UL;
+}
+
+static inline void delay_ms(uint32_t ms) {
+    uint32_t start = systick_ms;
+    while ((systick_ms - start) < ms);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  RCC — 25 MHz HSE → 100 MHz SYSCLK
+ * ═══════════════════════════════════════════════════════════════════════════ */
+static void rcc_init(void) {
+    /* ── 1. Enable PWR clock, set voltage scale 2 (supports up to 100 MHz) ── */
+    RCC->APB1ENR |= (1UL << 28);           /* PWREN */
+    PWR->CR |= (2UL << 14);               /* VOS = 0b10 = Scale 2 */
+
+    /* ── 2. Flash: 3 wait states + prefetch + instruction + data cache ─────
+     *    RM0383 Table 7: Scale2, 90 < HCLK ≤ 100 MHz → 3WS mandatory.
+     *    Setting latency BEFORE switching to PLL is critical — if the CPU
+     *    switches clock first, it immediately fetches at full speed with
+     *    insufficient wait states and hard-faults. */
+    FLASH->ACR = FLASH_ACR_LATENCY_3WS
+               | FLASH_ACR_PRFTEN
+               | FLASH_ACR_ICEN
+               | FLASH_ACR_DCEN;
+
+    /* Verify the latency bits actually stuck (write can be delayed one cycle) */
+    while ((FLASH->ACR & 0xFUL) != FLASH_ACR_LATENCY_3WS);
+
+    /* ── 3. Start HSE ───────────────────────────────────────────────────────*/
+    RCC->CR |= (1UL << 16);               /* HSEON */
+    while (!(RCC->CR & (1UL << 17)));     /* wait HSERDY */
+
+    /* ── 4. Configure PLL (must be off while programming) ──────────────────
+     *    Formula: SYSCLK = HSE / M * N / P
+     *             100    = 25  / 25 * 400 / 4
+     *
+     *    PLLCFGR layout:
+     *      [5:0]   PLLM   = 25
+     *      [14:6]  PLLN   = 400
+     *      [17:16] PLLP   = 0b01  (means ÷4; 00=÷2, 01=÷4, 10=÷6, 11=÷8)
+     *      [22]    PLLSRC = 1     (HSE)
+     *      [27:24] PLLQ   = 4     (not used, but keep valid: ≥2)
+     *
+     *    VCO_in  = 25 / 25 = 1 MHz  (valid range 1–2 MHz ✓)
+     *    VCO_out = 1 × 400 = 400 MHz (valid range 192–432 MHz ✓)
+     *    SYSCLK  = 400 / 4 = 100 MHz ✓
+     */
+    RCC->PLLCFGR = (25UL  <<  0)    /* PLLM  */
+                 | (400UL <<  6)    /* PLLN  */
+                 | (1UL   << 16)    /* PLLP = /4 */
+                 | (1UL   << 22)    /* PLLSRC = HSE */
+                 | (4UL   << 24);   /* PLLQ  */
+
+    /* ── 5. AHB / APB prescalers ───────────────────────────────────────────
+     *    HPRE  = 0000 → AHB  /1 → HCLK  = 100 MHz
+     *    PPRE1 = 100  → APB1 /2 → PCLK1 =  50 MHz  (max for APB1)
+     *    PPRE2 = 000  → APB2 /1 → PCLK2 = 100 MHz  (SPI1 source)
+     */
+    RCC->CFGR = (0b000UL << 4)     /* HPRE  = /1  */
+              | (0b100UL << 10)    /* PPRE1 = /2  */
+              | (0b000UL << 13);   /* PPRE2 = /1  */
+
+    /* ── 6. Enable PLL, wait for lock ──────────────────────────────────────*/
+    RCC->CR |= (1UL << 24);               /* PLLON */
+    while (!(RCC->CR & (1UL << 25)));     /* wait PLLRDY */
+
+    /* ── 7. Switch SYSCLK source to PLL ────────────────────────────────────
+     *    SW = 0b10 → PLL. Wait for SWS (status bits) = 0b10.           */
+    RCC->CFGR |= (2UL << 0);
+    while ((RCC->CFGR & (3UL << 2)) != (2UL << 2));
+
+    /* HSI can now be disabled to save ~1 mA if desired:
+     *   RCC->CR &= ~(1UL << 0);  */
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  GPIO
+ *  All display control signals live on GPIOA (same port as SPI1 pins)
+ *  so a single AHB1ENR bit enables them all.
+ *
+ *  Register field widths:
+ *    MODER:   2 bits/pin  → pin n at [2n+1:2n]   (00=In, 01=Out, 10=AF, 11=Analog)
+ *    OSPEEDR: 2 bits/pin  → pin n at [2n+1:2n]   (11 = Very High Speed)
+ *    AFR[0]:  4 bits/pin  → pin n at [4n+3:4n]   pins 0-7
+ *    AFR[1]:  4 bits/pin  → pin (n-8) at [4n+3:4n] pins 8-15
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Control line helpers — BSRR high half clears (pin + 16), low half sets */
+#define LCD_CS_LOW()   (GPIOA->BSRR = (1UL << (4 + 16)))
+#define LCD_CS_HIGH()  (GPIOA->BSRR = (1UL <<  4))
+#define LCD_DC_LOW()   (GPIOA->BSRR = (1UL << (3 + 16)))  /* command */
+#define LCD_DC_HIGH()  (GPIOA->BSRR = (1UL <<  3))         /* data    */
+#define LCD_RST_LOW()  (GPIOA->BSRR = (1UL << (2 + 16)))
+#define LCD_RST_HIGH() (GPIOA->BSRR = (1UL <<  2))
+
+static void gpio_init(void) {
+    /* Enable GPIOA clock */
+    RCC->AHB1ENR |= (1UL << 0);           /* GPIOAEN */
+    (void)RCC->AHB1ENR;                   /* one dummy read to flush AHB write buffer */
+
+    /*
+     * PA2  RST  → Output   MODER[5:4]   = 01
+     * PA3  DC   → Output   MODER[7:6]   = 01
+     * PA4  CS   → Output   MODER[9:8]   = 01
+     * PA5  SCK  → AF5      MODER[11:10] = 10
+     * PA7  MOSI → AF5      MODER[15:14] = 10
+     *
+     * Clear the 10 bits covering PA2–PA7, then OR in the values.
+     */
+    GPIOA->MODER &= ~( (3UL <<  4)   /* PA2 */
+                     | (3UL <<  6)   /* PA3 */
+                     | (3UL <<  8)   /* PA4 */
+                     | (3UL << 10)   /* PA5 */
+                     | (3UL << 14)); /* PA7 */
+
+    GPIOA->MODER |=  ( (1UL <<  4)   /* PA2 = Output */
+                     | (1UL <<  6)   /* PA3 = Output */
+                     | (1UL <<  8)   /* PA4 = Output */
+                     | (2UL << 10)   /* PA5 = AF     */
+                     | (2UL << 14)); /* PA7 = AF     */
+
+    /*
+     * OSPEEDR: set PA4 (CS), PA5 (SCK), PA7 (MOSI) to Very High (0b11).
+     * PA2/PA3 are control-only signals; High speed (0b10) is fine but
+     * setting all to Very High is harmless and simpler.
+     */
+    GPIOA->OSPEEDR |= ( (3UL <<  4)   /* PA2 */
+                      | (3UL <<  6)   /* PA3 */
+                      | (3UL <<  8)   /* PA4 */
+                      | (3UL << 10)   /* PA5 */
+                      | (3UL << 14)); /* PA7 */
+
+    /*
+     * Alternate function: AF5 = SPI1 for PA5, PA7.
+     * AFR[0] covers pins 0–7. AF5 = 0b0101.
+     * PA5 → AFR[0] bits [23:20]
+     * PA7 → AFR[0] bits [31:28]
+     */
+    GPIOA->AFR[0] &= ~( (0xFUL << 20)   /* PA5 clear */
+                      | (0xFUL << 28));  /* PA7 clear */
+    GPIOA->AFR[0] |=  ( (5UL   << 20)   /* PA5 = AF5 */
+                      | (5UL   << 28));  /* PA7 = AF5 */
+
+    /* Default control lines to idle state */
+    LCD_CS_HIGH();
+    LCD_DC_HIGH();
+    LCD_RST_HIGH();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  SPI1
+ *  CR1 register bits used:
+ *    [15] BIDIMODE = 0  full-duplex (MISO unused but harmless)
+ *    [11] DFF      = 0  8-bit data frame
+ *    [7]  LSBFIRST = 0  MSB first (ILI9341 requires this)
+ *    [9]  SSM      = 1  software slave management
+ *    [8]  SSI      = 1  internal slave select = high (so NSS pin = free)
+ *    [2]  MSTR     = 1  master mode
+ *    [5:3] BR      = 000 → fPCLK2 / 2 = 100 / 2 = 50 MHz
+ *    [1]  CPOL     = 0  clock idle low   (SPI Mode 0)
+ *    [0]  CPHA     = 0  sample on rising (SPI Mode 0)
+ *    [6]  SPE      = 1  SPI enable (set last)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+static void spi_init(void) {
+    RCC->APB2ENR |= (1UL << 12);           /* SPI1EN */
+    (void)RCC->APB2ENR;
+
+    SPI1->CR1 = (1UL << 9)                 /* SSM  */
+              | (1UL << 8)                 /* SSI  */
+              | (1UL << 2)                 /* MSTR */
+              | (0UL << 3);                /* BR = 000 → /2 → 50 MHz */
+              /* BIDIMODE=0, DFF=0, LSBFIRST=0, CPHA=0, CPOL=0 by default */
+
+    SPI1->CR2 = (1UL << 1);               /* TXDMAEN: DMA request on TX buffer empty */
+
+    SPI1->CR1 |= (1UL << 6);              /* SPE: enable peripheral */
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  DMA2 — Stream 3, Channel 3 (SPI1_TX)
+ *  RM0383 Table 28 confirms: DMA2, Stream3, Channel3 = SPI1_TX.
+ *
+ *  DMA_SxCR fields:
+ *    [27:25] CHSEL = 3        channel 3
+ *    [17:16] PL    = 11       Very High priority
+ *    [15:13] MSIZE = 00       8-bit memory word
+ *    [12:11] PSIZE = 00       8-bit peripheral word
+ *    [10]    MINC  = 1        memory address auto-increment
+ *    [9]     PINC  = 0        peripheral address fixed (SPI1->DR)
+ *    [8]     CIRC  = 0        no circular mode (one-shot per frame)
+ *    [7:6]   DIR   = 01       memory → peripheral
+ *    [4]     TCIE  = 1        interrupt on transfer complete
+ *    [0]     EN    = 0        not yet enabled (set in lcd_dma_send_frame)
+ *
+ *  FIFO is left in direct mode (FCR default) — for small 8-bit transfers
+ *  to a peripheral the FIFO burstmode adds latency with no throughput gain.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+volatile uint8_t dma_transfer_done = 1;
+
+static void dma_init(void) {
+    RCC->AHB1ENR |= (1UL << 22);          /* DMA2EN */
+    (void)RCC->AHB1ENR;
+
+    /* Ensure stream is off before programming */
+    DMA2_Stream3->CR &= ~(1UL << 0);      /* EN = 0 */
+    while (DMA2_Stream3->CR & (1UL << 0));/* wait for hardware to clear */
+
+    /* Clear all Stream3 flags in LIFCR:
+     *   Stream3 flags live in LIFCR bits [27:22]
+     *   CTCIF3=27, CHTIF3=26, CTEIF3=25, CDMEIF3=24, CFEIF3=22 */
+    DMA2->LIFCR = (0x3FUL << 22);
+
+    DMA2_Stream3->PAR  = (uint32_t)(&SPI1->DR);   /* destination: SPI data register */
+    DMA2_Stream3->M0AR = (uint32_t)(dma_tft_buffer); /* source: frame buffer */
+
+    DMA2_Stream3->CR =
+          (3UL << 25)    /* CHSEL = 3  */
+        | (3UL << 16)    /* PL = VHigh */
+        | (0UL << 13)    /* MSIZE = 8-bit */
+        | (0UL << 11)    /* PSIZE = 8-bit */
+        | (1UL << 10)    /* MINC = 1 */
+        | (0UL <<  9)    /* PINC = 0 */
+        | (0UL <<  8)    /* CIRC = 0 */
+        | (1UL <<  6)    /* DIR = Mem→Periph */
+        | (1UL <<  4);   /* TCIE = 1 */
+    /* EN remains 0 — set per frame in lcd_dma_send_frame() */
+}
+
+/*
+ * DMA2_Stream3 ISR — add to your vector table / isr.c:
+ *
+ *   void DMA2_Stream3_IRQHandler(void) {
+ *       if (DMA2->LISR & (1UL << 27)) {     // TCIF3
+ *           DMA2->LIFCR = (1UL << 27);      // clear TCIF3
+ *           // Wait for SPI TX to drain before pulling CS high
+ *           while (SPI1->SR & (1UL << 7));  // BSY
+ *           LCD_CS_HIGH();
+ *           dma_transfer_done = 1;
+ *       }
+ *   }
+ *
+ * NVIC enable for DMA2_Stream3 (IRQ 59):
+ *   NVIC_EnableIRQ(DMA2_Stream3_IRQn);   // or manually:
+ *   *((volatile uint32_t*)0xE000E104) |= (1UL << (59 - 32));
+ */
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  SPI BYTE HELPERS (polled, used only during ILI9341 init sequence)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+static inline void spi_send_byte(uint8_t b) {
+    while (!(SPI1->SR & (1UL << 1)));     /* wait TXE (TX buffer empty) */
+    *((volatile uint8_t *)&SPI1->DR) = b; /* 8-bit write; do NOT use SPI1->DR = b
+                                            * which the compiler may widen to 16-bit */
+}
+
+static inline void spi_wait_idle(void) {
+    while (SPI1->SR & (1UL << 7));        /* wait BSY = 0 */
+}
+
+/* ── ILI9341 command / data wrappers ─────────────────────────────────────── */
+static inline void lcd_cmd(uint8_t cmd) {
+    LCD_DC_LOW();
+    LCD_CS_LOW();
+    spi_send_byte(cmd);
+    spi_wait_idle();
+    LCD_CS_HIGH();
+    LCD_DC_HIGH();
+}
+
+static inline void lcd_data(uint8_t dat) {
+    LCD_CS_LOW();
+    spi_send_byte(dat);
+    spi_wait_idle();
+    LCD_CS_HIGH();
+}
+
+static inline void lcd_data16(uint16_t dat) {
+    LCD_CS_LOW();
+    spi_send_byte(dat >> 8);
+    spi_send_byte(dat & 0xFF);
+    spi_wait_idle();
+    LCD_CS_HIGH();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * ST7789 INITIALISATION SEQUENCE
+ * Landscape 320x240, RGB565 colour order, IPS Inversion Enabled.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+static void st7789_init(void) {
+    /* Hardware reset */
+    LCD_RST_LOW();
+    delay_ms(50);
+    LCD_RST_HIGH();
+    delay_ms(120);
+
+    /* Software Reset */
+    lcd_cmd(0x01); 
+    delay_ms(150);
+
+    /* Sleep Out */
+    lcd_cmd(0x11); 
+    delay_ms(50);
+
+    /* Memory Access Control (MADCTL) 
+     * 0x60 = Landscape mode, RGB color order 
+     * (Adjust to 0x68 if your Red and Blue are swapped, 
+     * or 0xA0 if the image is upside down) */
+    lcd_cmd(0x36); 
+    lcd_data(0x60);
+
+    /* Color Mode (COLMOD): 16-bit RGB565 */
+    lcd_cmd(0x3A); 
+    lcd_data(0x55);
+
+    /* Porch Setting (Standard ST7789 values) */
+    lcd_cmd(0xB2); 
+    lcd_data(0x0C); lcd_data(0x0C); lcd_data(0x00); lcd_data(0x33); lcd_data(0x33);
+
+    /* Gate Control */
+    lcd_cmd(0xB7); 
+    lcd_data(0x35);
+
+    /* VCOM Setting */
+    lcd_cmd(0xBB); 
+    lcd_data(0x19);
+
+    /* LCM Control */
+    lcd_cmd(0xC0); 
+    lcd_data(0x2C);
+
+    /* VDV and VRH Command Enable */
+    lcd_cmd(0xC2); 
+    lcd_data(0x01);
+
+    /* VRH Set */
+    lcd_cmd(0xC3); 
+    lcd_data(0x12);
+
+    /* VDV Set */
+    lcd_cmd(0xC4); 
+    lcd_data(0x20);
+
+    /* Frame Rate Control (60Hz) */
+    lcd_cmd(0xC6); 
+    lcd_data(0x0F);
+
+    /* Power Control 1 */
+    lcd_cmd(0xD0); 
+    lcd_data(0xA4); lcd_data(0xA1);
+
+    /* --- CRITICAL FOR ST7789 --- */
+    /* Display Inversion ON (IPS panels require this, ILI9341 does not) */
+    lcd_cmd(0x21); 
+
+    /* Normal Display ON */
+    lcd_cmd(0x13); 
+    delay_ms(10);
+
+    /* Main Display ON */
+    lcd_cmd(0x29); 
+    delay_ms(10);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  SET WRITE WINDOW  (ILI9341 column/row address set)
+ *  Must be called once before the first frame, and again if you ever change
+ *  the viewport (you won't for a full-screen game).
+ * ═══════════════════════════════════════════════════════════════════════════ */
+static void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
+    lcd_cmd(0x2A);                         /* Column Address Set (CASET) */
+    lcd_data16(x0);
+    lcd_data16(x1);
+
+    lcd_cmd(0x2B);                         /* Page Address Set (PASET) */
+    lcd_data16(y0);
+    lcd_data16(y1);
+
+    lcd_cmd(0x2C);                         /* Memory Write (RAMWR) — keeps CS low
+                                            * ready for bulk data bytes */
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  DMA FRAME PUSH
+ *  Sends the entire dma_tft_buffer (320×240×2 = 153,600 bytes) to the
+ *  display via DMA.  The DMA transfer counter (NDTR) is a 16-bit register
+ *  capped at 65535, so we split into two halves:
+ *    chunk A: 65535 bytes (rows 0..135 + partial row 136)
+ *    chunk B: 153600 − 65535 = 88065 bytes (rest)
+ *  Both sent with NDTR set appropriately.
+ *
+ *  The function blocks until the previous frame's DMA has finished (via
+ *  dma_transfer_done flag set in the ISR), then queues the new one.
+ *
+ *  IMPORTANT: The ILI9341 latches RGB565 as big-endian (high byte first).
+ *  Our palette stores values as uint16_t in host (little-endian) byte order.
+ *  For STM32 (little-endian Cortex-M4), the byte at the lower address is
+ *  the LSB of the uint16_t.  SPI sends bytes in memory order (low address
+ *  first), so 0xRRRR in memory sends LSB first — which is WRONG for the
+ *  display (it expects the high byte of RGB565 first).
+ *
+ *  Two options:
+ *    A. Byteswap each pixel in upscale_and_push_frame() using __REV16().
+ *    B. Configure SPI1 for 16-bit DFF and set LSBFIRST — but that requires
+ *       re-initialising SPI between init (8-bit) and frame push (16-bit).
+ *
+ *  We use option A: add this to upscale_and_push_frame() after writing c:
+ *    dst[...] = __builtin_bswap16(c);
+ *  Or equivalently in the palette init: store bytes swapped.
+ *  See the NOTE in hw_init() below.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+#define FRAME_BYTES  ((uint32_t)(TFT_WIDTH) * TFT_HEIGHT * 2UL)  /* 153,600 */
+#define DMA_MAX_NDTR 65535UL
+
+static void lcd_dma_send_chunk(uint8_t *src, uint32_t len) {
+    /* Wait for previous DMA to finish */
+    while (!dma_transfer_done);
+    dma_transfer_done = 0;
+
+    /* Disable stream, clear flags */
+    DMA2_Stream3->CR &= ~(1UL << 0);
+    while (DMA2_Stream3->CR & (1UL << 0));
+    DMA2->LIFCR = (0x3FUL << 22);         /* clear Stream3 flags */
+
+    DMA2_Stream3->M0AR = (uint32_t)src;
+    DMA2_Stream3->NDTR = (uint16_t)len;
+
+    LCD_CS_LOW();
+    DMA2_Stream3->CR |= (1UL << 0);       /* EN: start transfer */
+    /* Returns immediately — ISR clears dma_transfer_done when complete */
+}
+
+static void lcd_dma_send_frame(void) {
+    uint8_t *buf = (uint8_t *)dma_tft_buffer;
+
+    /* Open full-screen write window once per frame */
+    lcd_set_window(0, 0, TFT_WIDTH - 1, TFT_HEIGHT - 1);
+    /*
+     * After RAMWR (0x2C), the display expects raw pixel bytes with CS held low.
+     * lcd_set_window() already sent the RAMWR command.  Now we pull CS low
+     * and keep it there across both DMA chunks.  CS is released in the ISR
+     * after the final chunk completes.
+     */
+    LCD_DC_HIGH();                         /* data phase */
+
+    if (FRAME_BYTES <= DMA_MAX_NDTR) {
+        /* Single chunk (would fit, but 153600 > 65535, so this branch is
+         * never taken for 320×240; kept for smaller displays) */
+        lcd_dma_send_chunk(buf, FRAME_BYTES);
+    } else {
+        /*
+         * Two-chunk split.  We must block between chunks because the DMA
+         * stream can only transfer 65535 bytes at once.
+         *
+         * Chunk A: first 65535 bytes
+         * Chunk B: remaining 88065 bytes
+         *
+         * The ISR releases CS after chunk B.  We suppress the ISR's CS
+         * release for chunk A by checking a "last_chunk" flag — simplest
+         * approach is to re-arm the DMA in the ISR for chunk B.
+         *
+         * Simpler alternative (used here): spin-wait between chunks.
+         * At 50 MHz SPI, chunk A takes 65535×8/50M ≈ 10.5 ms, so the
+         * spin adds no real frame-time penalty vs a full ISR chain.
+         */
+        uint32_t chunkA = DMA_MAX_NDTR;
+        uint32_t chunkB = FRAME_BYTES - chunkA;
+
+        /* Chunk A */
+        lcd_dma_send_chunk(buf, chunkA);
+        while (!dma_transfer_done);        /* spin until done */
+        /* ISR raised CS — pull it back down for chunk B */
+        LCD_CS_LOW();
+
+        /* Chunk B */
+        lcd_dma_send_chunk(buf + chunkA, chunkB);
+        /* Caller can optionally spin here or do work; ISR releases CS */
+        while (!dma_transfer_done);        /* wait for final chunk */
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  BUTTONS (optional)
+ *  Five buttons on PB0–PB4, active-low (pull-ups enabled via PUPDR).
+ *  Bit positions match the SDL scancode replacements:
+ *    BIT 0 = PB0 = W / UP     (move forward)
+ *    BIT 1 = PB1 = S / DOWN   (move backward)
+ *    BIT 2 = PB2 = A / LEFT   (rotate left)
+ *    BIT 3 = PB3 = D / RIGHT  (rotate right)
+ *    BIT 4 = PB4 = Z / SPACE  (fire / open door)
+ *
+ *  Call hw_buttons_init() once and hw_buttons_read() each frame.
+ *  Remove if using a different input method.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+static void hw_buttons_init(void) {
+    RCC->AHB1ENR |= (1UL << 1);           /* GPIOBEN */
+    (void)RCC->AHB1ENR;
+
+    /* PB0–PB4: Input mode (MODER = 00, default) */
+    GPIOB->MODER &= ~(0x3FFUL << 0);      /* clear bits [9:0] */
+
+    /* Pull-up on PB0–PB4 (PUPDR = 01 per pin) */
+    GPIOB->PUPDR &= ~(0x3FFUL << 0);
+    GPIOB->PUPDR |=   0x155UL;            /* 0b01_01_01_01_01 for pins 0-4 */
+}
+
+typedef struct {
+    uint8_t forward, backward, left, right, action;
+} ButtonState;
+
+static ButtonState hw_buttons_read(void) {
+    uint32_t idr = GPIOB->IDR;
+    ButtonState b;
+    /* Active-low: button pressed = IDR bit = 0 */
+    b.forward  = !(idr & (1UL << 0));
+    b.backward = !(idr & (1UL << 1));
+    b.left     = !(idr & (1UL << 2));
+    b.right    = !(idr & (1UL << 3));
+    b.action   = !(idr & (1UL << 4));
+    return b;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  TOP-LEVEL INIT — call once before the game loop
+ * ═══════════════════════════════════════════════════════════════════════════ */
+static void hw_init(void) {
+    rcc_init();
+    systick_init();
+    gpio_init();
+    spi_init();
+    dma_init();
+
+    /*
+     * NVIC: enable DMA2_Stream3 interrupt (IRQ number 59).
+     * NVIC->ISER[1] covers IRQs 32–63.  Bit position = 59 - 32 = 27.
+     */
+    *((volatile uint32_t *)0xE000E104UL) |= (1UL << 27);
+
+    st7789_init();
+    hw_buttons_init();
+
+    /*
+     * NOTE — pixel byte order:
+     * init_vga_palette() in main.c must store palette entries byteswapped
+     * for DMA (SPI sends low-address byte first, ILI9341 expects MSB first).
+     * Change the palette line to:
+     *
+     *   uint16_t native = ((r>>3)<<11) | ((g>>2)<<5) | (b>>3);
+     *   rgb565_palette[i] = (native >> 8) | (native << 8);  // byteswap
+     *
+     * Alternatively use __builtin_bswap16(native).
+     * This is a no-op on the SDL simulator if you keep the #ifdef guard.
+     */
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  GAME LOOP TEMPLATE  (paste into main.c, replacing the SDL loop)
+ *
+ *  void game_loop(void) {
+ *      while (1) {
+ *          uint32_t t0 = systick_ms;
+ *
+ *          ButtonState btn = hw_buttons_read();
+ *          // Map btn.forward → move forward, btn.left → rotate, etc.
+ *          // (same logic as the SDL key handler, just different source)
+ *
+ *          render_frame();
+ *          draw_sprites();
+ *          draw_weapon();
+ *          upscale_and_push_frame();
+ *          draw_status_bar();
+ *
+ *          lcd_dma_send_frame();   // ~24.6 ms at 50 MHz SPI
+ *
+ *          // Cap at 30 fps (33 ms frame budget)
+ *          while ((systick_ms - t0) < 33);
+ *      }
+ *  }
+ * ═══════════════════════════════════════════════════════════════════════════ */

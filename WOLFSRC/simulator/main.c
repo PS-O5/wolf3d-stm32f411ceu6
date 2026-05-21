@@ -13,8 +13,7 @@
 #include "../assets/walls_8bit.h"
 #include "../assets/map_e1m1.h"
 #include "../assets/wolf_palette.h"
-#include "../assets/sprites_8bit.h"   // BUG 1 FIX: was "all_sprites_8bit.h" (wrong name/path).
-                             // Array inside is sprite_textures[], not all_sprites[].
+#include "../assets/sprites_8bit.h"   // "all_sprites_8bit.h" (wrong name/path).
 
 // --- WEAPON STATE ---
 int weapon_frame = 0; // 0 = idle, > 0 = firing recoil timer
@@ -164,7 +163,7 @@ int player_health = 100;
 int game_state = 3;
 int death_fade = 0;
 int flash_timer = 0;
-uint8_t flash_color = 0;
+uint16_t flash_color_16 = 0;
 
 
 // ─── PALETTE ─────────────────────────────────────────────────────────────────
@@ -700,17 +699,17 @@ char str[16];
     }
 }
 
-void draw_screen_flash(void) {
+void apply_translucent_flash(void) {
     if (flash_timer > 0) {
-        int viewport_height = RENDER_HEIGHT - 15; 
-        for (int y = 0; y < viewport_height; y++) {
-            for (int x = 0; x < RENDER_WIDTH; x++) {
-                //if ((x + y) % 2 == 0) {               //50% Intensity
-                //if ((x % 2 == 0) && (y % 2 == 0)) {   //25% Intensity
-                if ((x % 3 == 0) && (y % 3 == 0)) {     //11% Intensity
-                    frame_buffer_8bit[y * RENDER_WIDTH + x] = flash_color; 
-                }
-            }
+        // Loop over the entire 16-bit screen buffer (HUD included!)
+        for (int i = 0; i < TFT_WIDTH * TFT_HEIGHT; i++) {
+            uint16_t p1 = dma_tft_buffer[i];
+            uint16_t p2 = flash_color_16;
+            
+            // Fast 50% Alpha Blend for RGB565: 
+            // Mask out the lowest bit of each color channel to prevent carry-over overflow,
+            // divide both colors by 2 (bitshift right by 1), and add them together.
+            dma_tft_buffer[i] = ((p1 & 0xF7DE) >> 1) + ((p2 & 0xF7DE) >> 1);
         }
         flash_timer--;
     }
@@ -792,7 +791,7 @@ void update_world(void) {
                         sprites[i].active = 0;     // Consume item
 
                         flash_timer = 10;
-                        flash_color = 9;
+                        flash_color_16 = 0x001F;    //BLUE
                     }
                 } 
                 else if (sprites[i].texture_id == 28) { // Ammo
@@ -801,7 +800,7 @@ void update_world(void) {
                     sprites[i].active = 0;         // Consume item
                     
                     flash_timer = 10;
-                    flash_color = 14;
+                    flash_color_16 = 0xFFE0;    //YELLOW
                 }
             }
         }
@@ -868,7 +867,7 @@ void update_world(void) {
                     player_health -= 10;
                     
                     flash_timer = 10;
-                    flash_color = 40;
+                    flash_color_16 = 0xF800;   //RED
                 }
                 if (sprites[i].tick > 30) {
                     sprites[i].state = 4; // Switch to Reposition
@@ -973,7 +972,7 @@ void update_world(void) {
                 if (sprites[i].tick == 12) {
                     player_health -= 5; 
                     flash_timer = 5;
-                    flash_color = 40;
+                    flash_color_16 = 0xF800;    //RED
                 }
                 
                 if (sprites[i].tick > 18) {
@@ -1265,13 +1264,14 @@ int main(int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
         render_frame();
         draw_sprites();
         draw_weapon();
-        draw_screen_flash(); 
         draw_hud();
 
         print_gps_debug();
         
         upscale_and_push_frame();
 
+        apply_translucent_flash();
+        
         SDL_UpdateTexture(texture, NULL, dma_tft_buffer, TFT_WIDTH * sizeof(uint16_t));
         SDL_RenderClear(renderer);
         SDL_RenderCopy(renderer, texture, NULL, NULL);
