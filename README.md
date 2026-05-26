@@ -28,8 +28,8 @@ The untouched historical DOS C/ASM source code from id Software, preserved for r
 ## 🛠️ Hardware Requirements
 
 - **MCU:** STM32F411CEU6 "Black Pill" Development Board  
-- **Display:** SPI-based LCD (e.g., ST7789 or ILI9341 — see `docs/Wolf3D_STM32_Port_Guide.pdf` for wiring diagrams)  
-- **Input:** Analog Joystick or 4-Pin D-Pad + 2 Action Buttons  
+- **Display:** SPI-based LCD (ST7789 LCD driver)  — see `stm32_port/connections.txt` for wiring diagrams  
+- **Input:** Analog Joystick with a switch or 4-Pin D-Pad. At the moment `Open` action is performed by the on-board Key button 
 - **Programmer:** ST-Link v2  
 
 > **Note:** The engine features an automatic Input Fusion system. If an analog joystick is disconnected or broken, the engine will automatically default to D-Pad GPIO inputs.
@@ -117,7 +117,7 @@ If you want to modify textures or levels:
 ## 📜 Legal & Credits
 
 ### Port & Bare Metal Engine
-Written by **PSxO5**.
+Written by **PS_O5**.
 
 ### Original Game & Assets
 *Wolfenstein 3D* is a registered trademark of id Software.
