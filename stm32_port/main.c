@@ -949,7 +949,35 @@ int main(void) {
             if (input.fire) { reset_game(); game_state = 0; }
             delay_ms(16); continue;
         }
-        
+       
+        // Level Complete
+        if (game_state == 2) {
+            if (death_fade < 255) {
+                // Dissolve effect (Using color 2 for a different visual than death)
+                for (int i = 0; i < RENDER_WIDTH * RENDER_HEIGHT; i++) {
+                    if (rand() % 100 < 15) frame_buffer_8bit[i] = 2; 
+                }
+                death_fade += 10; 
+            } else {
+                // Solid screen and text
+                memset(frame_buffer_8bit, 2, RENDER_WIDTH * RENDER_HEIGHT); 
+                draw_mini_string(52, 50, "LEVEL COMPLETE", 15);
+                draw_mini_string(38, 70, "PRESS OPEN TO RESTART", 15);
+            }
+            
+            // Push to the STM32 SPI/DMA display handler
+            display_push_frame(frame_buffer_8bit, active_palette);
+            
+            // Wait for door open key to reset
+            if (input.door && death_fade >= 255) { 
+                reset_game();   
+                game_state = 3; // Go back to splash screen
+            }
+            
+            delay_ms(16); // Maintain ~60fps pacing for the fade
+            continue; // Skip the rest of the engine rendering!
+        }
+
         // Death Screen
         if (game_state == 1) {
             if (death_fade < 255) {
