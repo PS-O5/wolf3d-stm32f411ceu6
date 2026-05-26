@@ -130,6 +130,7 @@ The source code in `original_id_src/` is provided under the terms of the origina
 
 This repository is a derivative work based on the original 1995 public source code release of Wolfenstein 3D by id Software. The original documentation, historical notes, and compile guides for the DOS version have been preserved and can be found here:
 
+* See [id-Software/wolf3d](https://github.com/id-Software/wolf3d) for the original repository.
 * See [original_id_src/README/README.TXT](original_id_src/README/README.TXT) for the original release notes.
 * See [original_id_src/README/LICENSE.DOC](original_id_src/README/LICENSE.DOC) for the historical licensing details.
 
