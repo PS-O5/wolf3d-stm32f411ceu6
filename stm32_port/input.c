@@ -17,6 +17,7 @@
 #define ADC1_BASE       0x40012000
 #define ADC1_CR1        (*(volatile uint32_t *)(ADC1_BASE + 0x04))
 #define ADC1_CR2        (*(volatile uint32_t *)(ADC1_BASE + 0x08))
+#define ADC1_SMPR2      (*(volatile uint32_t *)(ADC1_BASE + 0x10)) // Added SMPR2 register
 #define ADC1_SQR1       (*(volatile uint32_t *)(ADC1_BASE + 0x2C))
 #define ADC1_SQR3       (*(volatile uint32_t *)(ADC1_BASE + 0x34))
 #define ADC1_DR         (*(volatile uint32_t *)(ADC1_BASE + 0x4C))
@@ -60,18 +61,25 @@ void input_init(void) {
     // APB2 is 96MHz. ADC Max is 36MHz. Set prescaler to /4 (24MHz)
     ADC_CCR = (1 << 16);
 
+    // Set ADC Sample Time to maximum (480 cycles) for CH1 and CH2
+    // CH1 is bits [5:3], CH2 is bits [8:6]. '7' is 0b111.
+    // Drops sample rate to ~24kHz, massively reducing analog noise.
+    ADC1_SMPR2 |= (7 << 3) | (7 << 6);
+
     /* DMA2 Stream 0 (ADC1) Circular Continuous Config */
     DMA2_S0CR = 0; 
     while (DMA2_S0CR & 1);
     DMA2_S0PAR  = (uint32_t)&ADC1_DR;
     DMA2_S0M0AR = (uint32_t)adc_vals;
     DMA2_S0NDTR = 2; 
-    DMA2_S0CR = (1 << 13) | (1 << 11) | (1 << 10) | (1 << 8) | (1 << 0); // MINC, PSIZE/MSIZE=16b, CIRC, EN
+    
+    // (0 << 25) explicitly selects DMA Channel 0 (ADC1)
+    DMA2_S0CR = (0 << 25) | (1 << 13) | (1 << 11) | (1 << 10) | (1 << 8) | (1 << 0); // MINC, PSIZE/MSIZE=16b, CIRC, EN
 
     /* ADC1 Continuous Scan Config */
     ADC1_CR1  = (1 << 8); // SCAN mode
     ADC1_SQR1 = ((2 - 1) << 20); // 2 conversions
-    ADC1_SQR3 = 1 | (2 << 5);    // SQ1=CH1(PA1), SQ2=CH2(PA2)
+    ADC1_SQR3 = 1 | (2 << 5);    // SQ1=CH1=PA1=Y_AXIS, SQ2=CH2=PA2=X_AXIS
     ADC1_CR2  = (1 << 0) | (1 << 1) | (1 << 8) | (1 << 9); // ADON, CONT, DMA, DDS
     ADC1_CR2 |= (1 << 30); // SWSTART
 }
@@ -87,6 +95,7 @@ InputState input_read(void) {
     
     // Persistent state tracker: 0 = Unknown, 1 = D-Pad Locked, 2 = Analog Locked
     static uint8_t active_input_mode = 0; 
+    static int idle_frame_count = 0; // Tracks consecutive frames with zero input
 
     // 1. Read D-Pad (Active LOW)
     int32_t dpad_move = 0;
@@ -141,11 +150,25 @@ InputState input_read(void) {
     }
 
     // Button Logic
+    // FIRE uses Level Detection: BJ fires continuously while the trigger is held
     state.fire = ((fire_hist & 0x0F) == 0x0F);
     
+    // DOOR uses Edge Detection: Opens on a single press, prevents toggling every frame
     uint8_t door_current = ((door_hist & 0x0F) == 0x0F);
     state.door = (door_current && !door_prev); // Rising edge
     door_prev = door_current;
+
+    // --- Idle Timeout Mode Reset ---
+    // If absolutely no input is detected for 120 frames (~2 seconds), 
+    // reset the active_input_mode so the system can re-detect a swapped controller.
+    if (state.move == 0 && state.turn == 0 && !state.fire && !state.door) {
+        idle_frame_count++;
+        if (idle_frame_count > 120) {
+            active_input_mode = 0; // Release the lock
+        }
+    } else {
+        idle_frame_count = 0; // Reset counter on any valid input
+    }
 
     return state;
 }

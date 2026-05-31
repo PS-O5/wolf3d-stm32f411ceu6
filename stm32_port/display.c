@@ -11,9 +11,9 @@
 #define GPIOA_BSRR      (*(volatile uint32_t *)(GPIOA_BASE + 0x18))
 
 #define GPIOA_OSPEEDR   (*(volatile uint32_t *)(GPIOA_BASE + 0x08))
-#define GPIOB_OSPEEDR   (*(volatile uint32_t *)(GPIOB_BASE + 0x08))
 
 #define GPIOB_BASE      0x40020400
+#define GPIOB_OSPEEDR   (*(volatile uint32_t *)(GPIOB_BASE + 0x08))
 #define GPIOB_MODER     (*(volatile uint32_t *)(GPIOB_BASE + 0x00))
 #define GPIOB_BSRR      (*(volatile uint32_t *)(GPIOB_BASE + 0x18))
 
@@ -42,7 +42,7 @@
 extern void delay_ms(uint32_t ms);
 
 /* Two 640-byte line buffers */
-uint16_t dma_line_buf[2][TFT_WIDTH];
+uint16_t dma_line_buf[2][TFT_WIDTH * 2];
 
 /* SINGLE Line Buffer */
 //uint16_t dma_line_buf[TFT_WIDTH];
@@ -145,6 +145,23 @@ void display_init(void) {
     spi_tx_cmd(0x29); 
 }
 
+__attribute__((optimize("O3")))
+static inline void convert_row_2x(uint8_t *src_row, uint16_t *dst_buf, uint16_t *palette) {
+    uint32_t *dst_32 = (uint32_t *)dst_buf;
+    
+    for (int x = 0; x < RENDER_WIDTH; x++) {
+        uint32_t color = palette[src_row[x]];
+        
+        // Pack two 16-bit identical pixels into one 32-bit word
+        uint32_t packed = color | (color << 16);
+        
+        // Write Line 1 (Horizontal 2x)
+        dst_32[x] = packed;
+        // Write Line 2 (Vertical 2x duplicate, offset by TFT_WIDTH/2 words)
+        dst_32[x + RENDER_WIDTH] = packed; 
+    }
+}
+
 
 /* --- DMA Upscale 2x line Pipeline --- */
 static inline void start_dma_transfer(uint16_t *buffer) {
@@ -152,7 +169,8 @@ static inline void start_dma_transfer(uint16_t *buffer) {
     while (DMA2_S3CR & 1); 
     DMA2_LIFCR = (1 << 27) | (1 << 26) | (1 << 25) | (1 << 24); 
     DMA2_S3M0AR = (uint32_t)buffer;
-    DMA2_S3NDTR = TFT_WIDTH;
+    // Send both lines at once (320 * 2 = 640 uint16_t elements)
+    DMA2_S3NDTR = TFT_WIDTH * 2; 
     DMA2_S3CR |= 1;  
 }
 
@@ -160,18 +178,6 @@ static inline void wait_dma_complete(void) {
     while (!(DMA2_LISR & (1 << 27))); 
 }
 
-static inline void convert_row_2x(uint8_t *src_row, uint16_t *dst_buf, uint16_t *palette) {
-    // Cast the 16-bit destination buffer to a 32-bit pointer
-    uint32_t *dst_32 = (uint32_t *)dst_buf;
-    
-    for (int x = 0; x < RENDER_WIDTH; x++) {
-        uint32_t color = palette[src_row[x]];
-        
-        // Pack the 16-bit color into both halves of a 32-bit word (e.g., 0xRRRRGGGG -> 0xRRRRGGGGRRRRGGGG)
-        // This writes two horizontal pixels to RAM in a single instruction!
-        dst_32[x] = color | (color << 16);
-    }
-}
 
 /*
 static inline void convert_row_2x(uint8_t *src_row, uint16_t *dst_buf, uint16_t *palette) {
@@ -183,6 +189,57 @@ static inline void convert_row_2x(uint8_t *src_row, uint16_t *dst_buf, uint16_t 
 }
 */
 
+
+/* --- The Perfect Pipelined Frame Push --- */
+void display_push_frame(uint8_t *framebuffer, uint16_t *palette) {
+    
+    // MINOR Fix: Group all window commands in 8-bit mode ONCE
+    set_spi_8bit();
+    spi_tx_cmd(0x2A); 
+    spi_tx_data(0); spi_tx_data(0);
+    spi_tx_data(319 >> 8); spi_tx_data(319 & 0xFF);
+
+    spi_tx_cmd(0x2B); 
+    spi_tx_data(0); spi_tx_data(0);
+    spi_tx_data(239 >> 8); spi_tx_data(239 & 0xFF);
+
+    spi_tx_cmd(0x2C); 
+    DC_DATA();
+    CS_LOW();
+    
+    // Switch to 16-bit payload mode permanently for the frame data
+    set_spi_16bit(); 
+
+    int active_buf = 0;
+    
+    // Prime the pipeline
+    convert_row_2x(&framebuffer[0], dma_line_buf[active_buf], palette);
+
+    for (int row = 0; row < RENDER_HEIGHT; row++) {
+        int idle_buf = active_buf ^ 1;
+
+        // Fire DMA ONCE to send the massive 2x vertical block
+        start_dma_transfer(dma_line_buf[active_buf]);
+        
+        // CPU actively converts the next row while DMA transmits
+        if (row < RENDER_HEIGHT - 1) {
+            convert_row_2x(&framebuffer[(row + 1) * RENDER_WIDTH], dma_line_buf[idle_buf], palette);
+        }
+
+        // Wait for DMA to finish the double-line transfer
+        wait_dma_complete();
+        
+        // Swap buffers
+        active_buf = idle_buf;
+    }
+
+    spi_wait_idle();
+    CS_HIGH();
+    // Return to 8-bit state for the next frame's commands
+    set_spi_8bit(); 
+}
+
+/*
 void display_push_frame(uint8_t *framebuffer, uint16_t *palette) {
     set_spi_8bit();
     spi_tx_cmd(0x2A); 
@@ -223,7 +280,7 @@ void display_push_frame(uint8_t *framebuffer, uint16_t *palette) {
     set_spi_8bit(); 
 }
 
-
+*/
 
 /* --- Synchronous 1x line DMA Pipeline --- 
 static inline void start_dma_transfer(uint16_t *buffer) {
