@@ -161,12 +161,27 @@ static inline void wait_dma_complete(void) {
 }
 
 static inline void convert_row_2x(uint8_t *src_row, uint16_t *dst_buf, uint16_t *palette) {
+    // Cast the 16-bit destination buffer to a 32-bit pointer
+    uint32_t *dst_32 = (uint32_t *)dst_buf;
+    
+    for (int x = 0; x < RENDER_WIDTH; x++) {
+        uint32_t color = palette[src_row[x]];
+        
+        // Pack the 16-bit color into both halves of a 32-bit word (e.g., 0xRRRRGGGG -> 0xRRRRGGGGRRRRGGGG)
+        // This writes two horizontal pixels to RAM in a single instruction!
+        dst_32[x] = color | (color << 16);
+    }
+}
+
+/*
+static inline void convert_row_2x(uint8_t *src_row, uint16_t *dst_buf, uint16_t *palette) {
     for (int x = 0; x < RENDER_WIDTH; x++) {
         uint16_t color = palette[src_row[x]];
         dst_buf[x * 2]     = color;
         dst_buf[x * 2 + 1] = color;
     }
 }
+*/
 
 void display_push_frame(uint8_t *framebuffer, uint16_t *palette) {
     set_spi_8bit();

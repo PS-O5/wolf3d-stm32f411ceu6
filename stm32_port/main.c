@@ -1,7 +1,6 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
-#include <math.h>
 #include <limits.h>
 
 #include "include/display.h"
@@ -64,7 +63,8 @@ uint16_t active_palette[256]; // Used for damage/pickup flashing
 
 // --- GAME STATE ---
 int32_t pos_x, pos_y, dir_x, dir_y, plane_x, plane_y;
-float   bob_time = 0.0f;
+//float   bob_time = 0.0f;
+int bob_counter = 0;
 int     weapon_frame = 0; 
 int     player_ammo = 8;
 int     player_health = 100;
@@ -72,8 +72,13 @@ int     game_state = 3; // 3 = Boot Splash, 0 = Play, 1 = Dead, 2 = Win
 int     death_fade = 0;
 int     flash_timer = 0;
 uint16_t flash_color_16 = 0;
+int player_angle = 0; // New LUT range from 0 to 511
 
 // --- DOOR STATE MACHINE ---
+
+#define MAX_ACTIVE_DOORS 16
+uint16_t active_door_list[MAX_ACTIVE_DOORS];
+int num_active_doors = 0;
 uint8_t door_state[64 * 64]  = {0}; 
 int32_t door_timer[64 * 64]  = {0};
 int32_t door_offset[64 * 64] = {0}; 
@@ -161,6 +166,53 @@ const Sprite initial_sprites[NUM_WORLD_SPRITES] = {
     { FLT2FX(14.5f), FLT2FX(29.5f), 5, 0, 1, 0, 0, 0 }
 };
 
+// --- MATH LUT ---
+
+// 512-entry sine table for fixed-point math (Angle 0 to 511 represents 0 to 2*PI)
+const int32_t fx_sin_lut[512] = {
+    0, 804, 1608, 2412, 3215, 4018, 4821, 5622, 6423, 7223, 8022, 8819, 9615, 10410, 11204, 11995,
+    12785, 13573, 14359, 15142, 15923, 16702, 17479, 18253, 19024, 19792, 20557, 21319, 22078, 22833, 23586, 24334,
+    25079, 25820, 26557, 27291, 28020, 28745, 29465, 30181, 30893, 31600, 32302, 32999, 33692, 34379, 35061, 35738,
+    36409, 37075, 37736, 38390, 39039, 39682, 40319, 40950, 41575, 42194, 42806, 43412, 44011, 44603, 45189, 45768,
+    46340, 46906, 47464, 48015, 48558, 49095, 49624, 50146, 50660, 51166, 51665, 52155, 52639, 53115, 53583, 54043,
+    54495, 54939, 55375, 55803, 56223, 56634, 57037, 57431, 57817, 58195, 58564, 58925, 59277, 59621, 59956, 60282,
+    60599, 60908, 61208, 61499, 61781, 62054, 62319, 62574, 62821, 63059, 63288, 63508, 63719, 63921, 64114, 64298,
+    64472, 64638, 64794, 64941, 65079, 65208, 65328, 65438, 65539, 65631, 65713, 65786, 65850, 65905, 65950, 65986,
+    66013, 66031, 66039, 66039, 66030, 66011, 65983, 65946, 65900, 65844, 65779, 65705, 65622, 65530, 65428, 65318,
+    65198, 65069, 64931, 64784, 64628, 64463, 64289, 64106, 63914, 63713, 63503, 63284, 63056, 62820, 62574, 62320,
+    62057, 61785, 61504, 61215, 60917, 60610, 60295, 59971, 59639, 59298, 58948, 58590, 58223, 57848, 57465, 57073,
+    56673, 56265, 55848, 55423, 54989, 54548, 54098, 53641, 53175, 52701, 52219, 51730, 51232, 50727, 50214, 49693,
+    49164, 48628, 48084, 47533, 46974, 46408, 45834, 45253, 44665, 44069, 43466, 42856, 42239, 41615, 40984, 40346,
+    39701, 39049, 38390, 37725, 37053, 36374, 35689, 34997, 34299, 33594, 32883, 32166, 31442, 30713, 29977, 29235,
+    28488, 27735, 26976, 26211, 25441, 24665, 23884, 23098, 22306, 21509, 20707, 19900, 19088, 18271, 17449, 16623,
+    15792, 14956, 14116, 13271, 12423, 11570, 10713, 9852, 8987, 8118, 7246, 6370, 5491, 4608, 3723, 2834,
+    1942, 1048, 151, -747, -1645, -2543, -3439, -4335, -5229, -6121, -7011, -7899, -8785, -9668, -10549, -11426,
+    -12301, -13173, -14041, -14906, -15768, -16626, -17480, -18331, -19177, -20020, -20858, -21692, -22522, -23347, -24168, -24984,
+    -25795, -26601, -27402, -28198, -28989, -29775, -30555, -31330, -32099, -32863, -33621, -34373, -35119, -35859, -36594, -37322,
+    -38044, -38759, -39469, -40172, -40868, -41558, -42241, -42917, -43586, -44249, -44904, -45552, -46193, -46826, -47452, -48071,
+    -48682, -49285, -49880, -50467, -51046, -51617, -52180, -52735, -53281, -53818, -54347, -54867, -55379, -55881, -56375, -56860,
+    -57335, -57801, -58258, -58706, -59144, -59572, -59991, -60400, -60799, -61188, -61567, -61936, -62295, -62644, -62983, -63312,
+    -63630, -63938, -64235, -64522, -64799, -65065, -65320, -65565, -65799, -66023, -66236, -66438, -66629, -66810, -66980, -67139,
+    -67287, -67424, -67550, -67666, -67770, -67863, -67945, -68016, -68076, -68124, -68162, -68188, -68203, -68207, -68200, -68181,
+    -68151, -68110, -68058, -67995, -67920, -67834, -67737, -67629, -67509, -67379, -67237, -67084, -66920, -66744, -66558, -66360,
+    -66151, -65931, -65700, -65457, -65203, -64938, -64662, -64375, -64077, -63768, -63448, -63116, -62774, -62421, -62057, -61682,
+    -61296, -60899, -60492, -60073, -59644, -59204, -58753, -58292, -57820, -57338, -56845, -56342, -55828, -55304, -54770, -54226,
+    -53671, -53107, -52533, -51949, -51355, -50751, -50138, -49515, -48883, -48241, -47590, -46930, -46260, -45582, -44894, -44198,
+    -43493, -42779, -42057, -41326, -40587, -39840, -39084, -38321, -37549, -36770, -35983, -35188, -34386, -33576, -32759, -31934,
+    -31102, -30263, -29417, -28564, -27704, -26837, -25964, -25084, -24198, -23305, -22406, -21501, -20589, -19672, -18749, -17820,
+    -16886, -15946, -15000, -14049, -13093, -12132, -11166, -10195, -9220, -8240, -7256, -6267, -5274, -4277, -3277, -2273
+};
+
+// Precomputed weapon bobbing offsets (32-frame cycle)
+const int8_t bob_y_lut[32] = {
+    0, 1, 2, 3, 4, 5, 5, 5, 5, 5, 5, 4, 4, 3, 1, 0, 
+    0, 1, 2, 3, 4, 5, 5, 5, 5, 5, 5, 4, 4, 3, 1, 0
+};
+const int8_t bob_x_lut[32] = {
+    3, 2, 2, 2, 2, 1, 1, 0, 0, 0, -1, -1, -2, -2, -2, -3, 
+   -3, -2, -2, -2, -2, -1, -1, 0, 0, 0, 1, 1, 2, 2, 2, 3
+};
+
 Sprite sprites[NUM_WORLD_SPRITES];
 
 // --- PALETTE SYSTEM ---
@@ -175,6 +227,15 @@ void init_vga_palette(void) {
     }
 }
 
+void trigger_flash(uint16_t color16, int duration) {
+    flash_timer = duration;
+    // Calculate the blended palette ONCE
+    for (int i = 0; i < 256; i++) {
+        active_palette[i] = ((base_palette[i] & 0xF7DE) >> 1) + ((color16 & 0xF7DE) >> 1);
+    }
+}
+
+/*
 void apply_translucent_flash(void) {
     if (flash_timer > 0) {
         for (int i = 0; i < 256; i++) {
@@ -186,6 +247,7 @@ void apply_translucent_flash(void) {
         memcpy(active_palette, base_palette, sizeof(base_palette));
     }
 }
+*/
 
 // --- ENGINE LOGIC ---
 int get_map_tile(int x, int y) {
@@ -274,7 +336,13 @@ void try_open_door(void) {
     
     if (tile >= 90 && tile <= 101) {
         int idx = ty * 64 + tx;
-        if (door_state[idx] == 0) door_state[idx] = 1;
+        if (door_state[idx] == 0) {
+            door_state[idx] = 1;
+            // Add to active updating list
+            if (num_active_doors < MAX_ACTIVE_DOORS) {
+                active_door_list[num_active_doors++] = idx;
+            }
+        }
     }
     
     if (tile == 21) { 
@@ -284,52 +352,59 @@ void try_open_door(void) {
 }
 
 void update_doors(void) {
-    for (int y = 0; y < 64; y++) {
-        for (int x = 0; x < 64; x++) {
-            int idx = y * 64 + x;
-            if (door_state[idx] == 1) { 
-                door_offset[idx] += 2;
-                if (door_offset[idx] >= 64) {
-                    door_offset[idx] = 64;
-                    door_state[idx] = 2; 
-                    door_timer[idx] = 150; 
-                }
-            } else if (door_state[idx] == 2) { 
-                if (door_timer[idx] > 0) door_timer[idx]--;
-                if (door_timer[idx] <= 0) {
-                    //int block = (FX2INT(pos_x) == x && FX2INT(pos_y) == y);
-                    
-                    // Replace with bounding box overlap check(robust than older check):
-                    int32_t r = FLT2FX(0.4f); // Radius wider than player collision
-                    int block = (pos_x + r > INT2FX(x) && pos_x - r < INT2FX(x + 1) &&
-                                pos_y + r > INT2FX(y) && pos_y - r < INT2FX(y + 1));
+    for (int i = 0; i < num_active_doors; ) {
+        int idx = active_door_list[i];
+        int keep_active = 1;
 
-                    for (int i = 0; i < NUM_WORLD_SPRITES && !block; i++) {
-                        if (sprites[i].active && sprites[i].state != 2) { 
-                            if (FX2INT(sprites[i].x) == x && FX2INT(sprites[i].y) == y) block = 1;
-                        }
-                    }
-                    if (block) door_timer[idx] = 30; 
-                    else door_state[idx] = 3; 
-                }
-            } else if (door_state[idx] == 3) { 
-                door_offset[idx] -= 2;
-                if (door_offset[idx] <= 0) {
-                    door_offset[idx] = 0;
-                    door_state[idx] = 0; 
-                }
+        if (door_state[idx] == 1) { // Opening
+            door_offset[idx] += 2;
+            if (door_offset[idx] >= 64) {
+                door_offset[idx] = 64;
+                door_state[idx] = 2; 
+                door_timer[idx] = 150; 
             }
+        } else if (door_state[idx] == 2) { // Open Wait
+            if (door_timer[idx] > 0) door_timer[idx]--;
+            if (door_timer[idx] <= 0) {
+                int x = idx % 64;
+                int y = idx / 64;
+                int32_t r = FLT2FX(0.4f); 
+                int block = (pos_x + r > INT2FX(x) && pos_x - r < INT2FX(x + 1) &&
+                             pos_y + r > INT2FX(y) && pos_y - r < INT2FX(y + 1));
+
+                for (int s = 0; s < NUM_WORLD_SPRITES && !block; s++) {
+                    if (sprites[s].active && sprites[s].state != 2) { 
+                        if (FX2INT(sprites[s].x) == x && FX2INT(sprites[s].y) == y) block = 1;
+                    }
+                }
+                if (block) door_timer[idx] = 30; 
+                else door_state[idx] = 3; 
+            }
+        } else if (door_state[idx] == 3) { // Closing
+            door_offset[idx] -= 2;
+            if (door_offset[idx] <= 0) {
+                door_offset[idx] = 0;
+                door_state[idx] = 0; 
+                keep_active = 0; // Door fully closed, flag for removal
+            }
+        }
+
+        // List management: remove inactive doors by swapping with the last element
+        if (!keep_active) {
+            num_active_doors--;
+            active_door_list[i] = active_door_list[num_active_doors];
+        } else {
+            i++;
         }
     }
 }
 
 // --- RENDER PIPELINE ---
 void render_frame(void) {
-    for (int y = 0; y < RENDER_HEIGHT; y++) {
+        for (int y = 0; y < RENDER_HEIGHT; y++) {
         uint8_t color = (y < RENDER_HEIGHT / 2) ? 29 : 27; // Ceiling / Floor
         memset(&frame_buffer_8bit[y * RENDER_WIDTH], color, RENDER_WIDTH);
     }
-
     for (int x = 0; x < RENDER_WIDTH; x++) {
         int32_t camera_x  = FX_DIV(INT2FX(2 * x), INT2FX(RENDER_WIDTH)) - INT2FX(1);
         int32_t ray_dir_x = dir_x + FX_MUL(plane_x, camera_x);
@@ -340,9 +415,14 @@ void render_frame(void) {
 
         float f_ray_x = (float)ray_dir_x / 65536.0f;
         float f_ray_y = (float)ray_dir_y / 65536.0f;
-        
-        int32_t delta_dist_x = (ray_dir_x == 0) ? INT2FX(1000) : FLT2FX(fabsf(1.0f / f_ray_x));
-        int32_t delta_dist_y = (ray_dir_y == 0) ? INT2FX(1000) : FLT2FX(fabsf(1.0f / f_ray_y));
+        int32_t delta_dist_x = (ray_dir_x == 0) ? INT2FX(1000) : FLT2FX(__builtin_fabsf(1.0f / f_ray_x));
+        int32_t delta_dist_y = (ray_dir_y == 0) ? INT2FX(1000) : FLT2FX(__builtin_fabsf(1.0f / f_ray_y));
+
+        /*
+        // FX_ONE is 65536. Dividing FX_ONE by the ray direction gives us the exact fixed-point ratio.
+        int32_t delta_dist_x = (ray_dir_x == 0) ? INT2FX(1000) : ABS(FX_DIV(FX_ONE, ray_dir_x));
+        int32_t delta_dist_y = (ray_dir_y == 0) ? INT2FX(1000) : ABS(FX_DIV(FX_ONE, ray_dir_y));
+*/
 
         int32_t side_dist_x, side_dist_y;
         int step_x, step_y;
@@ -448,48 +528,64 @@ void render_frame(void) {
 }
 
 void draw_sprites(void) {
-    int sprite_order[NUM_WORLD_SPRITES];
+    int visible_sprites[NUM_WORLD_SPRITES];
     int32_t sprite_depth[NUM_WORLD_SPRITES]; 
+    int num_visible = 0;
 
     int32_t det = FX_MUL(plane_x, dir_y) - FX_MUL(dir_x, plane_y);
     int32_t inv_det = (det == 0) ? 0 : FX_DIV(INT2FX(1), det);
 
+    if (inv_det == 0) return; // Safety check
+
+    // 1. Depth Calculation & Visibility Culling
     for (int i = 0; i < NUM_WORLD_SPRITES; i++) {
-        sprite_order[i] = i;
-        if (sprites[i].active && inv_det != 0) {
+        if (sprites[i].active) {
             int32_t sx = sprites[i].x - pos_x;
             int32_t sy = sprites[i].y - pos_y;
-            sprite_depth[i] = FX_MUL(inv_det, -FX_MUL(plane_y, sx) + FX_MUL(plane_x, sy));
-        } else {
-            sprite_depth[i] = -INT_MAX; 
-        }
-    }
+            int32_t transform_y = FX_MUL(inv_det, -FX_MUL(plane_y, sx) + FX_MUL(plane_x, sy));
 
-    for (int i = 0; i < NUM_WORLD_SPRITES - 1; i++) {
-        for (int j = 0; j < NUM_WORLD_SPRITES - i - 1; j++) {
-            if (sprite_depth[sprite_order[j]] < sprite_depth[sprite_order[j + 1]]) {
-                int temp = sprite_order[j];
-                sprite_order[j] = sprite_order[j + 1];
-                sprite_order[j + 1] = temp;
+            // Cull anything behind the camera plane immediately
+            if (transform_y > 0) {
+                sprite_depth[i] = transform_y;
+                visible_sprites[num_visible] = i;
+                num_visible++;
             }
         }
     }
 
-    for (int k = 0; k < NUM_WORLD_SPRITES; k++) {
-        int i = sprite_order[k]; 
-        if (!sprites[i].active || sprite_depth[i] <= 0) continue;
+    // 2. Insertion Sort (Only on visible sprites, Farthest to Nearest)
+    for (int i = 1; i < num_visible; i++) {
+        int key_index = visible_sprites[i];
+        int32_t key_depth = sprite_depth[key_index];
+        int j = i - 1;
+
+        while (j >= 0 && sprite_depth[visible_sprites[j]] < key_depth) {
+            visible_sprites[j + 1] = visible_sprites[j];
+            j = j - 1;
+        }
+        visible_sprites[j + 1] = key_index;
+    }
+
+    // 3. Render Loop
+    for (int k = 0; k < num_visible; k++) {
+        int i = visible_sprites[k]; 
         int32_t transform_y = sprite_depth[i];
         
+        // Near-clip plane cutoff
+        if (transform_y < FLT2FX(0.1f)) continue;
+
         int32_t sx = sprites[i].x - pos_x;
         int32_t sy = sprites[i].y - pos_y;
         int32_t transform_x = FX_MUL(inv_det,  FX_MUL(dir_y, sx) - FX_MUL(dir_x, sy));
-
-        if (transform_y < FLT2FX(0.1f)) continue;
 
         int32_t screen_ratio = FX_DIV(transform_x, transform_y);
         int sprite_screen_x  = (RENDER_WIDTH / 2) + FX2INT(FX_MUL(INT2FX(RENDER_WIDTH / 2), screen_ratio));
 
         int sprite_height = ABS(FX2INT(FX_DIV(INT2FX(RENDER_HEIGHT), transform_y)));
+        
+        // Prevent division by zero in step calculation
+        if (sprite_height == 0) continue; 
+
         int draw_start_y  = -sprite_height / 2 + RENDER_HEIGHT / 2;
         if (draw_start_y < 0) draw_start_y = 0;
         int draw_end_y    =  sprite_height / 2 + RENDER_HEIGHT / 2;
@@ -501,19 +597,23 @@ void draw_sprites(void) {
         int draw_end_x   =  sprite_width / 2 + sprite_screen_x;
         if (draw_end_x >= RENDER_WIDTH) draw_end_x = RENDER_WIDTH - 1;
 
+        // --- NEW: Fixed-point texture stepping (8-bit fractional) ---
+        int32_t tex_step = (64 << 8) / sprite_height; 
+        int32_t tex_pos_start = (draw_start_y - RENDER_HEIGHT / 2 + sprite_height / 2) * tex_step;
+
         for (int stripe = draw_start_x; stripe < draw_end_x; stripe++) {
             if (transform_y >= z_buffer[stripe]) continue; 
+            
             int tex_x = ((stripe - (-sprite_width / 2 + sprite_screen_x)) * 64) / sprite_width;
             if (tex_x < 0) tex_x = 0;
             if (tex_x > 63) tex_x = 63;
 
-            for (int y = draw_start_y; y < draw_end_y; y++) {
-                int d = (y * 256) - (RENDER_HEIGHT * 128) + (sprite_height * 128);
-                int tex_y = ((d * 64) / sprite_height) / 256;
-                if (tex_y < 0) tex_y = 0;
-                if (tex_y > 63) tex_y = 63;
+            int32_t tex_pos = tex_pos_start; // Reset Y step for this column
 
-                //uint8_t color = sprite_textures[sprites[i].texture_id][tex_y * 64 + tex_x];
+            for (int y = draw_start_y; y < draw_end_y; y++) {
+                int tex_y = (tex_pos >> 8) & 63;
+                tex_pos += tex_step; // Accumulate instead of divide
+
                 uint8_t color = sprite_textures[sprite_lut[sprites[i].texture_id]][tex_y * 64 + tex_x];
                 if (color != TRANSPARENCY_COLOR) {
                     frame_buffer_8bit[y * RENDER_WIDTH + stripe] = color;
@@ -523,9 +623,13 @@ void draw_sprites(void) {
     }
 }
 
+
 void draw_weapon(void) {
-    int bob_y = (int)(fabsf(sinf(bob_time)) * 6.0f);
-    int bob_x = (int)(cosf(bob_time) * 3.0f);
+    //int bob_y = (int)(fabsf(sinf(bob_time)) * 6.0f);
+    //int bob_x = (int)(cosf(bob_time) * 3.0f);
+
+    int bob_y = bob_y_lut[bob_counter];
+    int bob_x = bob_x_lut[bob_counter];
 
     int scale   = 1;
     int start_x = (RENDER_WIDTH / 2) - (32 * scale) + bob_x;
@@ -598,13 +702,17 @@ void draw_hud(void) {
     int hud_height = 15;
     int hud_start_y = RENDER_HEIGHT - hud_height;
     
+    // Brute-force clear the background
     for (int y = hud_start_y; y < RENDER_HEIGHT; y++) {
         memset(&frame_buffer_8bit[y * RENDER_WIDTH], 3, RENDER_WIDTH);
     }
+    // Draw the top border lines
     for (int x = 0; x < RENDER_WIDTH; x++) {
         frame_buffer_8bit[hud_start_y * RENDER_WIDTH + x] = 0; 
         frame_buffer_8bit[(hud_start_y + 1) * RENDER_WIDTH + x] = 2;
     }
+    
+    // Draw all text and numbers unconditionally
     draw_mini_string(10, hud_start_y + 2, "LVL", 15); draw_number(15, hud_start_y + 10, 1, 15);
     draw_mini_string(45, hud_start_y + 2, "SCORE", 15); draw_number(50, hud_start_y + 10, 0, 15); 
     draw_mini_string(90, hud_start_y + 2, "HEALTH", 15); draw_number(95, hud_start_y + 10, player_health, 15);
@@ -629,12 +737,14 @@ void update_world(void) {
                         player_health += 25;
                         if (player_health > 100) player_health = 100;
                         sprites[i].active = 0;     
-                        flash_timer = 10; flash_color_16 = 0x001F; // Blue
+                        //flash_timer = 10; flash_color_16 = 0x001F; // Blue
+                        trigger_flash(0x001F, 10);
                     }
                 } else if (sprites[i].texture_id == 28) { //Ammo
                     player_ammo += 8;
                     sprites[i].active = 0;         
-                    flash_timer = 10; flash_color_16 = 0xFFE0; // Yellow
+                    //flash_timer = 10; flash_color_16 = 0xFFE0; // Yellow
+                    trigger_flash(0xFFE0, 10);
                 }
             }
         }
@@ -675,7 +785,7 @@ void update_world(void) {
             } 
             else if (sprites[i].state == 3) { 
                 sprites[i].texture_id = (sprites[i].tick < 15) ? 97 : 98; 
-                if (sprites[i].tick == 15) { player_health -= 10; flash_timer = 10; flash_color_16 = 0xF800; }
+                if (sprites[i].tick == 15) { player_health -= 10; trigger_flash(0xF800, 10);}//flash_timer = 10; flash_color_16 = 0xF800
                 if (sprites[i].tick > 30)  { sprites[i].state = 4; sprites[i].tick = 0; }
             }
             else if (sprites[i].state == 4) {
@@ -762,8 +872,9 @@ void update_world(void) {
 
                 if (sprites[i].tick == 12) {
                     player_health -= 5; 
-                    flash_timer = 5;
-                    flash_color_16 = 0xF800;    // RED
+                    //flash_timer = 5;
+                    //flash_color_16 = 0xF800;    // RED
+                    trigger_flash(0xF800, 5);
                 }
                 
                 if (sprites[i].tick > 18) {
@@ -809,10 +920,17 @@ void update_world(void) {
 void process_player_input(InputState input) {
     // Tuning parameters mapped from fixed-point boundaries
     int32_t move_speed = (input.move / 4); // Max 0x6000 -> 0x1800 (~0.09)
-    float rot_speed = (float)input.turn / 200000.0f; // Max 0x4000 -> ~0.08 rad/frame
+    //float rot_speed = (float)input.turn / 200000.0f; // Max 0x4000 -> ~0.08 rad/frame
 
-    if (input.move != 0) bob_time += 0.2f;
-    else bob_time = 0.0f;
+    //if (input.move != 0) bob_time += 0.2f;
+    //else bob_time = 0.0f;
+
+    // Advance the bobbing animation cycle if moving
+    if (input.move != 0) {
+        bob_counter = (bob_counter + 1) & 31; // Wraps cleanly from 31 back to 0
+    } else {
+        bob_counter = 0; // Reset to center when standing still
+    }
 
     // Movement
     if (input.move != 0) {
@@ -820,6 +938,7 @@ void process_player_input(InputState input) {
         if (is_passable(pos_x, pos_y + FX_MUL(dir_y, move_speed))) pos_y += FX_MUL(dir_y, move_speed);
     }
 
+    /*
     // Rotation
     if (input.turn != 0) {
         float fdx = (float)dir_x / FX_ONE, fdy = (float)dir_y / FX_ONE;
@@ -828,6 +947,27 @@ void process_player_input(InputState input) {
         dir_y   = FLT2FX(fdx * sinf(-rot_speed) + fdy * cosf(-rot_speed));
         plane_x = FLT2FX(fpx * cosf(-rot_speed) - fpy * sinf(-rot_speed));
         plane_y = FLT2FX(fpx * sinf(-rot_speed) + fpy * cosf(-rot_speed));
+    }
+    */
+
+    // Rotation via LUT
+    if (input.turn != 0) {
+        // Map joystick turn value to angle steps (adjust the divisor for turn speed)
+        int angle_step = input.turn / 8000; 
+        
+        // Wolf3D turns opposite to standard cartesian, invert the step
+        player_angle = (player_angle - angle_step) & 511; 
+
+        // Get sin/cos (cos is just sin shifted by 128 degrees/quarter circle)
+        int32_t sin_val = fx_sin_lut[player_angle];
+        int32_t cos_val = fx_sin_lut[(player_angle + 128) & 511];
+
+        // Recalculate pure direction vectors based on global angle
+        // Standard projection plane ratio in Wolf3D is 0.66
+        dir_x   = cos_val;
+        dir_y   = sin_val;
+        plane_x = -FX_MUL(INT2FX(0) + 43253, sin_val); // 43253 is 0.66 in fixed point
+        plane_y =  FX_MUL(INT2FX(0) + 43253, cos_val);
     }
 
     if (weapon_frame > 0) weapon_frame--;
@@ -873,6 +1013,7 @@ void reset_game(void) {
     dir_x = FLT2FX(-1.0f); dir_y = FLT2FX(0.0f);
     plane_x = FLT2FX(0.0f); plane_y = FLT2FX(-0.66f);
     player_health = 100; player_ammo = 8; weapon_frame = -30;
+    player_angle = 256;
     
     // Clear damage flash state and reset palette
     flash_timer = 0;
@@ -1004,8 +1145,14 @@ int main(void) {
         draw_weapon();
         draw_hud();
 
-        apply_translucent_flash();
-        display_push_frame(frame_buffer_8bit, active_palette);
+        // Palette pointer swap logic for translucent flash
+        uint16_t* render_palette = base_palette;
+        if (flash_timer > 0) {
+            render_palette = active_palette;
+            flash_timer--;
+        }
+
+        display_push_frame(frame_buffer_8bit, render_palette);
     }
     return 0;
 }

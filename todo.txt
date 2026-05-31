@@ -1,0 +1,91 @@
+This is a seriously impressive bare-metal port! Getting a raycaster running smoothly on an STM32F411 with a custom software renderer, fixed-point math, and DMA/SPI integration is no small feat. You’ve already done a great job enabling the FPU, flash caches, and wait states.
+
+As an AI, I don't have hands to play it, but looking at the engine architecture, I can spot several specific bottlenecks and memory optimizations. Since you're running on a Cortex-M4F (which has a single-precision hardware FPU but lacks a 64-bit hardware divider), we can squeeze a lot more juice out of this silicon without touching the gameplay feel.
+
+Here are my suggestions for optimizing and enhancing your engine, categorized by impact:
+
+### **1. Mathematical & CPU Bottlenecks (High Impact)**
+
+* **Kill the 64-bit Division:**
+Your fixed-point division macro is a major hidden bottleneck:
+```c
+#define FX_DIV(a,b) (int32_t)(((int64_t)(a) << FX_SHIFT) / (b))
+
+```
+
+
+The STM32F411 has a hardware 32-bit divider (`SDIV`, 2-12 cycles), but it **does not** have a 64-bit hardware divider. Every time you call `FX_DIV`, the compiler inserts a call to a software library routine (like `__aeabi_ldiv0`), which costs hundreds of clock cycles.
+* **Fix:** Since you have a hardware FPU, it is actually vastly faster to cast to `float`, divide using the FPU, and cast back, rather than using 64-bit software division:
+
+
+```c
+#define FX_DIV(a,b) FLT2FX((float)(a) / (float)(b)) 
+// Or optimize your fixed point logic so pre-shifting 'a' stays within 32 bits.
+
+```
+
+
+* **Ditch `<math.h>` Trig Functions:**
+In `process_player_input` and `draw_weapon`, you are using `sinf()`, `cosf()`, and `fabsf()`. Standard math library trig functions are slow and highly accurate, which is overkill for a retro 3D engine.
+* **Fix:** Implement a 256-value (or 360-value) float or fixed-point Lookup Table (LUT) for sine and cosine. This turns hundreds of cycles into a single $O(1)$ memory read.
+
+
+* **Avoid Mixing Float and Fixed-Point in the Raycaster:**
+In `render_frame`, you have this DDA setup:
+```c
+float f_ray_x = (float)ray_dir_x / 65536.0f;
+int32_t delta_dist_x = (ray_dir_x == 0) ? INT2FX(1000) : FLT2FX(fabsf(1.0f / f_ray_x));
+
+```
+
+
+Converting fixed to float, dividing, and converting back inside the rendering loop is expensive. Stick entirely to one domain. Because you have the Cortex-M4F, an all-float DDA setup might actually outperform a fixed-point setup depending on compiler optimization, but at the very least, unify this math.
+
+### **2. Rendering Pipeline & Inner Loops (Medium Impact)**
+
+* **Optimize the Sprite Sorting Algorithm:**
+You are currently using a Bubble Sort to depth-sort your sprites:
+```c
+for (int i = 0; i < NUM_WORLD_SPRITES - 1; i++) {
+    for (int j = 0; j < NUM_WORLD_SPRITES - i - 1; j++) { ... }
+}
+
+```
+
+
+Bubble sort is strictly $O(N^2)$. While 52 sprites isn't huge, this runs every single frame.
+* **Fix:** Swap this to an **Insertion Sort**. Since sprites usually only move a little bit relative to the player frame-by-frame, the array is likely *already nearly sorted*. Insertion sort dominates on nearly-sorted data.
+
+
+* **Bitwise Shifts for 2D Array Lookups:**
+Inside your tightest inner loops (drawing walls and sprites), you do this:
+```c
+tex_y * 64 + tex_x
+
+```
+
+
+While the compiler *might* optimize this to a shift, don't leave it to chance in an inner loop. Force the bitwise shift, which guarantees a single-cycle execution:
+```c
+(tex_y << 6) + tex_x
+
+```
+
+
+* **Double Buffering (If RAM Allows):**
+Depending on your `RENDER_WIDTH` and `RENDER_HEIGHT`, your 8-bit `frame_buffer_8bit` might be quite small (e.g., 160x120 = 19.2 KB). The STM32F411 has 128 KB of RAM.
+* **Enhancement:** If you aren't doing this already behind the scenes in `display.h`, use two framebuffers. Render into Buffer A while the DMA hardware asynchronously transmits Buffer B to the SPI display. This effectively makes the display transfer "free" regarding CPU time.
+
+
+
+### **3. Visual Enhancements (Zero Usability Impact)**
+
+* **Distance Shading (Depth Fog):**
+Right now, your ceiling and floor are solid colors (`29` and `27`). You can add incredible atmosphere by using the palette to simulate depth fog.
+* **Enhancement:** Create a slightly darker version of your palette colors. In `render_frame`, use `perp_wall_dist` to determine a shading shift. If the wall is far away, bitwise-shift or offset the drawn pixel to a darker palette index. You can do the same for the floor/ceiling based on the `y` coordinate (rows closer to `RENDER_HEIGHT / 2` are further away and should be darker).
+
+
+* **Dynamic Lighting/Flashes:**
+You already have a brilliant palette trick for `apply_translucent_flash` (damage/pickups). You can extend this to make the muzzle flash of the gun illuminate the walls for exactly 1 frame when `weapon_frame == 30`, simply by applying a bright yellow/white additive blend to `active_palette`.
+
+---
