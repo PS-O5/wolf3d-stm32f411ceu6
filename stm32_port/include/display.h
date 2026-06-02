@@ -4,11 +4,11 @@
 #include <stdint.h>
 
 #define RENDER_WIDTH  160
-#define RENDER_HEIGHT 120
+#define RENDER_HEIGHT 100
 #define TFT_WIDTH     320
 #define TFT_HEIGHT    240
 
 void display_init(void);
-void display_push_frame(uint8_t *framebuffer, uint16_t *palette);
+void display_push_frame(uint8_t *framebuffer, uint16_t *palette, uint16_t *hud_buf);
 
 #endif // DISPLAY_H

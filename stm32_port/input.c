@@ -93,9 +93,15 @@ void input_tick(void) {
 InputState input_read(void) {
     InputState state = {0};
     
-    // Persistent state tracker: 0 = Unknown, 1 = D-Pad Locked, 2 = Analog Locked
+    // Persistent state trackers
     static uint8_t active_input_mode = 0; 
-    static int idle_frame_count = 0; // Tracks consecutive frames with zero input
+    static int idle_frame_count = 0; 
+    
+    // --- NEW: Calibration Variables ---
+    static int boot_frames = 0;
+    static int32_t center_y = 2048;
+    static int32_t center_x = 2048;
+    static int is_calibrated = 0;
 
     // 1. Read D-Pad (Active LOW)
     int32_t dpad_move = 0;
@@ -106,44 +112,53 @@ InputState input_read(void) {
     if (!(GPIOB_IDR & (1 << 14))) dpad_turn = -MAX_TURN;  // LEFT
     if (!(GPIOB_IDR & (1 << 15))) dpad_turn = MAX_TURN;   // RIGHT
 
-    // Lock into D-Pad mode the moment a button is pressed
     if (dpad_move != 0 || dpad_turn != 0) {
         active_input_mode = 1; 
     }
 
-    // 2. Process Analog Logic
-    int32_t raw_y = (int32_t)adc_vals[0] - 2048;
-    int32_t raw_x = (int32_t)adc_vals[1] - 2048;
+    // --- NEW: Auto-Calibration Logic ---
+    if (!is_calibrated) {
+        boot_frames++;
+        // Wait ~10 frames (160ms) for power to stabilize and DMA to update
+        if (boot_frames > 10) { 
+            // Guard against calibrating if the pins are dead shorted
+            if (adc_vals[0] > 100 && adc_vals[0] < 4000) center_y = adc_vals[0];
+            if (adc_vals[1] > 100 && adc_vals[1] < 4000) center_x = adc_vals[1];
+            is_calibrated = 1;
+        }
+    }
+
+    // 2. Process Analog Logic using the DYNAMIC center
+    int32_t raw_y = (int32_t)adc_vals[0] - center_y;
+    int32_t raw_x = (int32_t)adc_vals[1] - center_x;
     
-    // Strict valid check: Not grounded/shorted to VCC, AND outside the deadzone
-    int analog_is_valid = (adc_vals[0] > 100 && adc_vals[0] < 3995 && 
-                           adc_vals[1] > 100 && adc_vals[1] < 3995);
+    // Validate: Not completely grounded on both axes
+    int analog_is_valid = !(adc_vals[0] < 10 && adc_vals[1] < 10); 
                            
     int analog_is_moving = (raw_y > 300 || raw_y < -300 || raw_x > 300 || raw_x < -300);
 
-    // Lock into Analog mode if we see valid, intentional analog movement before any D-pad use
     if (active_input_mode == 0 && analog_is_valid && analog_is_moving) {
         active_input_mode = 2;
     }
 
     // 3. Route Output Based on Locked Mode
     if (active_input_mode == 1) {
-        // D-Pad locked: Completely ignore the ADC variables
         state.move = dpad_move;
         state.turn = dpad_turn;
     } 
     else {
-        // Analog locked (or still waiting for input)
         if (analog_is_valid) {
-            // Apply Deadzone
-            if (raw_y > -300 && raw_y < 300) raw_y = 0;
-            if (raw_x > -300 && raw_x < 300) raw_x = 0;
+            // Apply Deadzone (we can safely use a smaller deadzone now that it's perfectly centered!)
+            if (raw_y > -200 && raw_y < 200) raw_y = 0;
+            if (raw_x > -200 && raw_x < 200) raw_x = 0;
 
-            // Scale proportionally
+            // Clamp max bounds so the math doesn't overflow if the center was skewed
+            if (raw_y > 2047) raw_y = 2047; else if (raw_y < -2048) raw_y = -2048;
+            if (raw_x > 2047) raw_x = 2047; else if (raw_x < -2048) raw_x = -2048;
+
             state.move = (raw_y * MAX_SPEED) / 2048;
             state.turn = (raw_x * MAX_TURN) / 2048;
         } else {
-            // Hardware check failed (e.g., pins are tied to ground)
             state.move = 0;
             state.turn = 0;
         }

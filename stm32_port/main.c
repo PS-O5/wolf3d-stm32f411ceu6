@@ -11,7 +11,15 @@
 #include "include/map_e1m1.h"
 #include "include/wolf_palette.h"
 #include "include/stm32_sprites_8bit.h"
+#include "include/hud_statusbar.h"
+#include "include/hud_digits.h"
+#include "include/hud_faces.h"
 
+// Dedicated 25.6 KB SRAM buffer for the native 16-bit HUD
+uint16_t hud_buffer[STATUSBAR_H][STATUSBAR_W];
+//#define VIEW_HEIGHT (RENDER_HEIGHT - 20) // 120 - 20 = 100 rows (200 TFT pixels)
+                                         
+                                         
 // --- BARE METAL SYSTEM REGISTERS ---
 #define SYSTICK_BASE  0xE000E010
 #define SCB_BASE      0xE000ED00
@@ -98,6 +106,11 @@ const uint8_t font_alpha_3x5[26][5] = {
     {0x5,0x5,0x5,0x5,0x7}, {0x5,0x5,0x5,0x2,0x2}, {0x5,0x5,0x5,0x7,0x5}, {0x5,0x5,0x2,0x5,0x5},
     {0x5,0x5,0x2,0x2,0x2}, {0x7,0x1,0x2,0x4,0x7}
 };
+
+// Adjust width/height to match digit header and hardware
+#define DIGIT_WIDTH  8
+#define DIGIT_HEIGHT 12
+
 
 // --- SPRITES ---
 int32_t z_buffer[RENDER_WIDTH];
@@ -404,7 +417,7 @@ void render_frame(void) {
         for (int y = 0; y < RENDER_HEIGHT; y++) {
         uint8_t color = (y < RENDER_HEIGHT / 2) ? 29 : 27; // Ceiling / Floor
         memset(&frame_buffer_8bit[y * RENDER_WIDTH], color, RENDER_WIDTH);
-    }
+        }
     for (int x = 0; x < RENDER_WIDTH; x++) {
         int32_t camera_x  = FX_DIV(INT2FX(2 * x), INT2FX(RENDER_WIDTH)) - INT2FX(1);
         int32_t ray_dir_x = dir_x + FX_MUL(plane_x, camera_x);
@@ -413,16 +426,18 @@ void render_frame(void) {
         int map_x = FX2INT(pos_x);
         int map_y = FX2INT(pos_y);
 
-        float f_ray_x = (float)ray_dir_x / 65536.0f;
-        float f_ray_y = (float)ray_dir_y / 65536.0f;
+        //float f_ray_x = (float)ray_dir_x / 65536.0f;
+        //float f_ray_y = (float)ray_dir_y / 65536.0f;
+        /*
         int32_t delta_dist_x = (ray_dir_x == 0) ? INT2FX(1000) : FLT2FX(__builtin_fabsf(1.0f / f_ray_x));
         int32_t delta_dist_y = (ray_dir_y == 0) ? INT2FX(1000) : FLT2FX(__builtin_fabsf(1.0f / f_ray_y));
+        */
 
-        /*
+        
         // FX_ONE is 65536. Dividing FX_ONE by the ray direction gives us the exact fixed-point ratio.
         int32_t delta_dist_x = (ray_dir_x == 0) ? INT2FX(1000) : ABS(FX_DIV(FX_ONE, ray_dir_x));
         int32_t delta_dist_y = (ray_dir_y == 0) ? INT2FX(1000) : ABS(FX_DIV(FX_ONE, ray_dir_y));
-*/
+
 
         int32_t side_dist_x, side_dist_y;
         int step_x, step_y;
@@ -633,7 +648,7 @@ void draw_weapon(void) {
 
     int scale   = 1;
     int start_x = (RENDER_WIDTH / 2) - (32 * scale) + bob_x;
-    int start_y = RENDER_HEIGHT - (64 * scale) + bob_y - 15;
+    int start_y = RENDER_HEIGHT - (64 * scale) + bob_y;
 
     int weapon_tex_id = 421; 
     if (weapon_frame > 10) weapon_tex_id = 421; 
@@ -698,25 +713,144 @@ void draw_number(int x, int y, int number, uint8_t color_idx) {
     draw_mini_string(x, y, str, color_idx);
 }
 
+void draw_hud_number(int start_x, int start_y, int number, int max_digits) {
+    char str[10];
+    int i = 0, temp = number;
+    if (temp == 0) { str[i++] = '0'; }
+    while (temp > 0) { str[i++] = (temp % 10) + '0'; temp /= 10; }
+
+    // Target dimensions for the UI
+    int target_w = 8;
+    int target_h = 12;
+    
+    // Add a 1-pixel gap so digits don't touch
+    int stride_x = target_w + 1; 
+
+    // Right-align the digits inside the box
+    int cursor_x = start_x + ((max_digits - i) * stride_x);
+
+    for (int j = i - 1; j >= 0; j--) {
+        int digit_idx = str[j] - '0';
+       
+        for (int dy = 0; dy < target_h; dy++) {
+            // Map target Y block to the 16x16 source using the header macros
+            int sy1 = (dy * DIGIT_H) / target_h;
+            int sy2 = ((dy + 1) * DIGIT_H - 1) / target_h;
+            
+            for (int dx = 0; dx < target_w; dx++) {
+                // Map target X block to the 16x16 source using the header macros
+                int sx1 = (dx * DIGIT_W) / target_w;
+                int sx2 = ((dx + 1) * DIGIT_W - 1) / target_w;
+
+                //uint16_t final_color = DIGIT_BG_R565_BE; 
+                
+                // Scan the calculated block of pixels for any foreground color
+                uint16_t final_color = 0x0208; // Default to the true background
+                
+                // Scan the block for any foreground color
+                for (int y = sy1; y <= sy2; y++) {
+                    for (int x = sx1; x <= sx2; x++) {
+                        uint8_t msb = hud_digits[digit_idx][y][x * 2]; 
+                        uint8_t lsb = hud_digits[digit_idx][y][(x * 2) + 1];
+                        uint16_t color = (msb << 8) | lsb;
+                        
+                        // Ignore both the documented BG and the TRUE hex BG
+                        if (color != DIGIT_BG_R565_BE && color != 0x0208) {
+                            // Paint the actual font pixels pure white!
+                            final_color = 0xFFFF; 
+                        }
+                    }
+                }
+            
+                // Only draw if we found a font pixel
+                if (final_color == 0xFFFF) {
+                    hud_buffer[start_y + dy][cursor_x + dx] = final_color;
+                }
+            }
+        }
+        cursor_x += stride_x;
+    }
+}
+
+void draw_hud_face(void) {
+    int face_idx;
+    int face_row = 0;
+    
+    // Idle Animation State Machine (Looks left, center, right)
+    static int face_timer = 0;
+    static int face_state = 1; // 0=Left, 1=Center, 2=Right
+    
+    // Only look around if he is still alive
+    if (player_health > 0) {
+        face_timer++;
+        if (face_timer > 45) { // Change glance every ~0.75 seconds
+            face_timer = 0;
+            int r = rand() % 100;
+            if (r < 25) face_state = 0;
+            else if (r < 50) face_state = 2;
+            else face_state = 1;
+        }
+    } else {
+        face_state = 1; // Lock to center frame if dead
+    }
+
+    // Map current health to the exact 0-7 sprite row array
+    if      (player_health >= 100) face_row = 0; // Face 1
+    else if (player_health >= 90)  face_row = 1; // Face 2
+    else if (player_health >= 75)  face_row = 2; // Face 3
+    else if (player_health >= 55)  face_row = 3; // Face 4
+    else if (player_health >= 35)  face_row = 4; // Face 5
+    else if (player_health >= 25)  face_row = 5; // Face 6 (Ripper mislabeled as Gatling/Ouch)
+    else if (player_health >= 10)  face_row = 6; // Face 7 (Ripper mislabeled as Dead1/2/3)
+    else                           face_row = 7; // Death Face (Ripper mislabeled as Dead4)
+    
+    // Calculate the exact 1D index from the 24-face array
+    face_idx = (face_row * 3) + face_state; 
+
+    // Centered in the proper Face box
+    int face_x = 136; 
+
+    // Clear the background
+    for (int y = 0; y < 32; y++) {
+        for (int x = 0; x < 24; x++) {
+            hud_buffer[4 + y][face_x + x] = 0; 
+        }
+    }
+
+    // Draw the face
+    for (int y = 0; y < 32; y++) {
+        for (int x = 0; x < 24; x++) {
+            uint8_t msb = hud_faces[face_idx][y][x * 2];
+            uint8_t lsb = hud_faces[face_idx][y][x * 2 + 1];
+            uint16_t color = (msb << 8) | lsb;
+            
+            if (color != DIGIT_BG_R565_BE) { 
+                hud_buffer[4 + y][face_x + x] = color;
+            }
+        }
+    }
+}
+
 void draw_hud(void) {
-    int hud_height = 15;
-    int hud_start_y = RENDER_HEIGHT - hud_height;
-    
-    // Brute-force clear the background
-    for (int y = hud_start_y; y < RENDER_HEIGHT; y++) {
-        memset(&frame_buffer_8bit[y * RENDER_WIDTH], 3, RENDER_WIDTH);
+    // 1. Parse the background directly
+    for (int y = 0; y < STATUSBAR_H; y++) {
+        for (int x = 0; x < STATUSBAR_W; x++) {
+            uint8_t msb = hud_statusbar[y][x * 2];
+            uint8_t lsb = hud_statusbar[y][x * 2 + 1];
+            hud_buffer[y][x] = (msb << 8) | lsb;
+        }
     }
-    // Draw the top border lines
-    for (int x = 0; x < RENDER_WIDTH; x++) {
-        frame_buffer_8bit[hud_start_y * RENDER_WIDTH + x] = 0; 
-        frame_buffer_8bit[(hud_start_y + 1) * RENDER_WIDTH + x] = 2;
-    }
+
+    // 2. Overlay dynamic elements
+    draw_hud_face();
     
-    // Draw all text and numbers unconditionally
-    draw_mini_string(10, hud_start_y + 2, "LVL", 15); draw_number(15, hud_start_y + 10, 1, 15);
-    draw_mini_string(45, hud_start_y + 2, "SCORE", 15); draw_number(50, hud_start_y + 10, 0, 15); 
-    draw_mini_string(90, hud_start_y + 2, "HEALTH", 15); draw_number(95, hud_start_y + 10, player_health, 15);
-    draw_mini_string(130, hud_start_y + 2, "AMMO", 15); draw_number(135, hud_start_y + 10, player_ammo, 15);
+    // 3. Exact Wolf3D Coordinates (Y=16 drops them into the black boxes)
+    // format: draw_hud_number(X, Y, value, max_digits);
+    draw_hud_number(16,  19, 1, 2);             // Level
+    draw_hud_number(35,  19, 0, 6);             // Score
+    draw_hud_number(45, 19, 0, 2);              //Lives           
+    draw_hud_number(167, 19, player_health, 3); // Health
+    draw_hud_number(201, 19, player_ammo, 3);   // Ammo
 }
 
 // --- GAME LOGIC UPDATE ---
@@ -1024,6 +1158,7 @@ void reset_game(void) {
     memset(door_timer, 0, sizeof(door_timer));
     memset(door_offset, 0, sizeof(door_offset));
     memcpy(sprites, initial_sprites, sizeof(initial_sprites));
+    memset(hud_buffer, 0, sizeof(hud_buffer));
 }
 
 void system_clock_96mhz(void) {
@@ -1086,7 +1221,7 @@ int main(void) {
             if ((ms_ticks / 500) % 2) draw_mini_string(42, 75, "PRESS FIRE TO START", 14); 
             draw_mini_string(21, 105, "ALL RIGHTS RESERVED ID SOFTWARE", 7); 
             
-            display_push_frame(frame_buffer_8bit, active_palette);
+            display_push_frame(frame_buffer_8bit, active_palette, (uint16_t *)hud_buffer);
             if (input.fire) { reset_game(); game_state = 0; }
             delay_ms(16); continue;
         }
@@ -1107,7 +1242,7 @@ int main(void) {
             }
             
             // Push to the STM32 SPI/DMA display handler
-            display_push_frame(frame_buffer_8bit, active_palette);
+            display_push_frame(frame_buffer_8bit, active_palette, (uint16_t *)hud_buffer);
             
             // Wait for door open key to reset
             if (input.door && death_fade >= 255) { 
@@ -1128,7 +1263,7 @@ int main(void) {
                 memset(frame_buffer_8bit, 40, RENDER_WIDTH * RENDER_HEIGHT); 
                 draw_mini_string(70, 50, "DEATH", 15); draw_mini_string(38, 70, "PRESS OPEN TO RESTART", 15);
             }
-            display_push_frame(frame_buffer_8bit, active_palette);
+            display_push_frame(frame_buffer_8bit, active_palette, (uint16_t *)hud_buffer);
             if (input.door && death_fade >= 255) { reset_game(); game_state = 3; }
             delay_ms(16); continue;
         }
@@ -1152,7 +1287,7 @@ int main(void) {
             flash_timer--;
         }
 
-        display_push_frame(frame_buffer_8bit, render_palette);
+        display_push_frame(frame_buffer_8bit, render_palette, (uint16_t *)hud_buffer);
     }
     return 0;
 }

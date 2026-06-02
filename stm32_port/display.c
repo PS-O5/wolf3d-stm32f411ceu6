@@ -1,4 +1,8 @@
+#include <stdint.h>
 #include "include/display.h"
+
+#define STATUSBAR_W 320
+#define STATUSBAR_H 40
 
 /* --- Register Base Offsets --- */
 #define RCC_BASE        0x40023800
@@ -167,7 +171,7 @@ static inline void convert_row_2x(uint8_t *src_row, uint16_t *dst_buf, uint16_t 
 static inline void start_dma_transfer(uint16_t *buffer) {
     DMA2_S3CR &= ~1; 
     while (DMA2_S3CR & 1); 
-    DMA2_LIFCR = (1 << 27) | (1 << 26) | (1 << 25) | (1 << 24); 
+    DMA2_LIFCR = (1 << 27) | (1 << 26) | (1 << 25) | (1 << 24) | (1 << 22); 
     DMA2_S3M0AR = (uint32_t)buffer;
     // Send both lines at once (320 * 2 = 640 uint16_t elements)
     DMA2_S3NDTR = TFT_WIDTH * 2; 
@@ -191,7 +195,7 @@ static inline void convert_row_2x(uint8_t *src_row, uint16_t *dst_buf, uint16_t 
 
 
 /* --- The Perfect Pipelined Frame Push --- */
-void display_push_frame(uint8_t *framebuffer, uint16_t *palette) {
+void display_push_frame(uint8_t *framebuffer, uint16_t *palette, uint16_t *hud_buf) {
     
     // MINOR Fix: Group all window commands in 8-bit mode ONCE
     set_spi_8bit();
@@ -212,30 +216,43 @@ void display_push_frame(uint8_t *framebuffer, uint16_t *palette) {
 
     int active_buf = 0;
     
-    // Prime the pipeline
+// --- PHASE 1: The 3D View (Rows 0 to 99) ---
+    // Upscaled from 8-bit to 16-bit 2x
+    int view_rows = 100; // Assuming 160x120 engine -> 320x240 screen
     convert_row_2x(&framebuffer[0], dma_line_buf[active_buf], palette);
 
-    for (int row = 0; row < RENDER_HEIGHT; row++) {
+    for (int row = 0; row < view_rows; row++) {
         int idle_buf = active_buf ^ 1;
-
-        // Fire DMA ONCE to send the massive 2x vertical block
-        start_dma_transfer(dma_line_buf[active_buf]);
+        start_dma_transfer(dma_line_buf[active_buf]); // Sends 2x lines
         
-        // CPU actively converts the next row while DMA transmits
-        if (row < RENDER_HEIGHT - 1) {
+        if (row < view_rows - 1) {
             convert_row_2x(&framebuffer[(row + 1) * RENDER_WIDTH], dma_line_buf[idle_buf], palette);
         }
-
-        // Wait for DMA to finish the double-line transfer
         wait_dma_complete();
-        
-        // Swap buffers
         active_buf = idle_buf;
+    }
+
+    // --- PHASE 2: The Native HUD (Rows 200 to 239 on TFT) ---
+    // Raw 16-bit DMA directly from SRAM (No CPU conversion needed!)
+    // Cast the 2D array to a flat 1D pointer for DMA math
+    uint16_t *flat_hud = (uint16_t *)hud_buf;
+    
+    for (int row = 0; row < STATUSBAR_H; row++) {
+        // We must override the DMA transfer function slightly because 
+        // the HUD isn't vertically doubled. We only send 320 uint16_t's.
+        DMA2_S3CR &= ~1; 
+        while (DMA2_S3CR & 1); 
+        DMA2_LIFCR = (1 << 27) | (1 << 26) | (1 << 25) | (1 << 24) | (1 << 22); 
+        
+        DMA2_S3M0AR = (uint32_t)&flat_hud[row * STATUSBAR_W];
+        DMA2_S3NDTR = STATUSBAR_W; // Only send 1 native line (320 pixels)
+        
+        DMA2_S3CR |= 1;  
+        wait_dma_complete();
     }
 
     spi_wait_idle();
     CS_HIGH();
-    // Return to 8-bit state for the next frame's commands
     set_spi_8bit(); 
 }
 
