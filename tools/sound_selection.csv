@@ -1,0 +1,24 @@
+Original Array Name,Your Label,Keep,Size (Bytes)
+_pcm_0,Achtung,Yes,4096
+_pcm_1,Die,Yes,1900
+_pcm_2,bark,Yes,3793
+_pcm_3,door_close,Yes,4096
+_pcm_4,noise2,No,4096
+_pcm_5,door_open,Yes,4096
+_pcm_6,noise3,No,4096
+_pcm_7,noise4,No,3611
+_pcm_8,door_open1,Yes,4096
+_pcm_9,door_close1,Yes,4096
+_pcm_10,noise5,No,1830
+_pcm_11,gun_fire1,Yes,3600
+_pcm_12,gun_fire2,Yes,3605
+_pcm_13,noise6,No,4065
+_pcm_14,SS,No,4096
+_pcm_15,noise7,No,399
+_pcm_16,guten_tag,No,4096
+_pcm_17,tag,No,2238
+_pcm_18,mutti,No,4096
+_pcm_19,muti,No,1685
+_pcm_20,mch_gun,No,4096
+_pcm_21,noise8,No,4096
+_pcm_22,noise9,No,2524

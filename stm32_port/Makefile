@@ -12,8 +12,8 @@ LDFLAGS = $(MCU_FLAGS) -T linker.ld -Wl,--gc-sections -Wl,--print-memory-usage -
 
 # Targeted Artifact Generation Configurations
 TARGET = wolf3d_stm32f411ceu6
-SRCS   = main.c startup_stm32f411xe.s display.c input.c
-OBJS   = main.o startup_stm32f411xe.o display.o input.o
+SRCS   = main.c startup_stm32f411xe.s display.c input.c audio.c
+OBJS   = main.o startup_stm32f411xe.o display.o input.o audio.o
 
 all: $(TARGET).elf $(TARGET).bin
 

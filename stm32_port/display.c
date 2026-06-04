@@ -38,8 +38,12 @@
 /* Pin Control Macros */
 #define CS_LOW()        GPIOA_BSRR = (1 << (4 + 16))
 #define CS_HIGH()       GPIOA_BSRR = (1 << 4)
-#define DC_CMD()        GPIOA_BSRR = (1 << (3 + 16))
-#define DC_DATA()       GPIOA_BSRR = (1 << 3)
+//TIM2_CH4 for audio
+//#define DC_CMD()        GPIOA_BSRR = (1 << (3 + 16))
+//#define DC_DATA()       GPIOA_BSRR = (1 << 3)
+
+#define DC_CMD()        GPIOB_BSRR = (1 << (0 + 16))
+#define DC_DATA()       GPIOB_BSRR = (1 << 0)
 #define RST_LOW()       GPIOB_BSRR = (1 << (2 + 16))
 #define RST_HIGH()      GPIOB_BSRR = (1 << 2)
 
@@ -104,19 +108,19 @@ void display_init(void) {
     GPIOA_AFRL  &= ~((0xF << (5 * 4)) | (0xF << (7 * 4)));
     GPIOA_AFRL  |=  ((0x5 << (5 * 4)) | (0x5 << (7 * 4)));
 
-    // PA4 (CS), PA3 (DC) -> Output
-    GPIOA_MODER &= ~((3 << (4 * 2)) | (3 << (3 * 2)));
-    GPIOA_MODER |=  ((1 << (4 * 2)) | (1 << (3 * 2)));
+    // PA4 (CS) -> Output
+    GPIOA_MODER &= ~(3 << (4 * 2));
+    GPIOA_MODER |=  (1 << (4 * 2));
 
-    // PB2 (RST) -> Output
-    GPIOB_MODER &= ~(3 << (2 * 2));
-    GPIOB_MODER |=  (1 << (2 * 2));
+    // PB2 (RST) and PB0 (DC) -> Output
+    GPIOB_MODER &= ~((3 << (2 * 2)) | (3 << (0 * 2)));
+    GPIOB_MODER |=  ((1 << (2 * 2)) | (1 << (0 * 2)));
 
     
-    // Set PA3, PA4, PA5, PA7 to Very High Speed(48MHz) (11)
-    GPIOA_OSPEEDR |= (3 << (3 * 2)) | (3 << (4 * 2)) | (3 << (5 * 2)) | (3 << (7 * 2));
-    // Set PB2 to Very High Speed
-    GPIOB_OSPEEDR |= (3 << (2 * 2));
+    // Set PA4, PA5, PA7 to Very High Speed(48MHz) (11)
+    GPIOA_OSPEEDR |= (3 << (4 * 2)) | (3 << (5 * 2)) | (3 << (7 * 2));
+    // Set PB2 & PB0 to Very High Speed
+    GPIOB_OSPEEDR |= ((3 << (2 * 2)) | (3 << (0 * 2)));
 
 
     // SPI1 Config (Master, /16 Baud = ~1MHz initially)

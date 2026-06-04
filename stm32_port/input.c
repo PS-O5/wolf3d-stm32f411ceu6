@@ -157,7 +157,7 @@ InputState input_read(void) {
             if (raw_x > 2047) raw_x = 2047; else if (raw_x < -2048) raw_x = -2048;
 
             state.move = (raw_y * MAX_SPEED) / 2048;
-            state.turn = (raw_x * MAX_TURN) / 2048;
+            state.turn = (raw_x * MAX_TURN * 2) / 2048;
         } else {
             state.move = 0;
             state.turn = 0;

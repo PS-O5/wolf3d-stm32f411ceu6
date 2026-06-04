@@ -32,3 +32,6 @@ PB12: UP
 PB13: DOWN
 PB14: LEFT
 PB15: RIGHT
+
+Audio Output (PWM based 8 bit)
+PA3: Piezo Speaker

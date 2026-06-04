@@ -14,6 +14,7 @@
 #include "include/hud_statusbar.h"
 #include "include/hud_digits.h"
 #include "include/hud_faces.h"
+#include "include/audio.h"
 
 // Dedicated 25.6 KB SRAM buffer for the native 16-bit HUD
 uint16_t hud_buffer[STATUSBAR_H][STATUSBAR_W];
@@ -43,6 +44,7 @@ static volatile uint32_t ms_ticks = 0;
 void SysTick_Handler(void) {
     ms_ticks++;
     input_tick(); // Feed the debounce shift registers
+    audio_tick(); // Synthetic sound sweeps
 }
 
 void delay_ms(uint32_t ms) {
@@ -351,6 +353,7 @@ void try_open_door(void) {
         int idx = ty * 64 + tx;
         if (door_state[idx] == 0) {
             door_state[idx] = 1;
+            play_sound(SND_DOOR_OPEN1);
             // Add to active updating list
             if (num_active_doors < MAX_ACTIVE_DOORS) {
                 active_door_list[num_active_doors++] = idx;
@@ -374,7 +377,7 @@ void update_doors(void) {
             if (door_offset[idx] >= 64) {
                 door_offset[idx] = 64;
                 door_state[idx] = 2; 
-                door_timer[idx] = 150; 
+                door_timer[idx] = 150;
             }
         } else if (door_state[idx] == 2) { // Open Wait
             if (door_timer[idx] > 0) door_timer[idx]--;
@@ -391,13 +394,14 @@ void update_doors(void) {
                     }
                 }
                 if (block) door_timer[idx] = 30; 
-                else door_state[idx] = 3; 
+                else door_state[idx] = 3;
+                play_sound(SND_DOOR_CLOSE1);
             }
         } else if (door_state[idx] == 3) { // Closing
             door_offset[idx] -= 2;
             if (door_offset[idx] <= 0) {
                 door_offset[idx] = 0;
-                door_state[idx] = 0; 
+                door_state[idx] = 0;
                 keep_active = 0; // Door fully closed, flag for removal
             }
         }
@@ -873,12 +877,14 @@ void update_world(void) {
                         sprites[i].active = 0;     
                         //flash_timer = 10; flash_color_16 = 0x001F; // Blue
                         trigger_flash(0x001F, 10);
+                        play_sound(SND_HEALTH);
                     }
                 } else if (sprites[i].texture_id == 28) { //Ammo
                     player_ammo += 8;
                     sprites[i].active = 0;         
                     //flash_timer = 10; flash_color_16 = 0xFFE0; // Yellow
                     trigger_flash(0xFFE0, 10);
+                    play_sound(SND_AMMO);
                 }
             }
         }
@@ -889,6 +895,7 @@ void update_world(void) {
             if (sprites[i].state == 0) { 
                 if (ABS(dx) < aggro_range && ABS(dy) < aggro_range) {
                     sprites[i].state = 1; sprites[i].tick = 0;
+                    play_sound(SND_ACHTUNG);
                 } else {
                     int patrol_cycle = sprites[i].tick % 240;
                     int32_t step_x = 0, step_y = 0;
@@ -919,7 +926,7 @@ void update_world(void) {
             } 
             else if (sprites[i].state == 3) { 
                 sprites[i].texture_id = (sprites[i].tick < 15) ? 97 : 98; 
-                if (sprites[i].tick == 15) { player_health -= 10; trigger_flash(0xF800, 10);}//flash_timer = 10; flash_color_16 = 0xF800
+                if (sprites[i].tick == 15) { player_health -= 10; trigger_flash(0xF800, 10); play_sound(SND_GUN_FIRE2);}//flash_timer = 10; flash_color_16 = 0xF800
                 if (sprites[i].tick > 30)  { sprites[i].state = 4; sprites[i].tick = 0; }
             }
             else if (sprites[i].state == 4) {
@@ -957,6 +964,7 @@ void update_world(void) {
                 if (ABS(dx) < aggro_range && ABS(dy) < aggro_range) {
                     sprites[i].state = 1; 
                     sprites[i].tick = 0;
+                    play_sound(SND_BARK);
                 } else {
                     int patrol_cycle = sprites[i].tick % 240;
                     int32_t step_x = 0, step_y = 0;
@@ -1005,7 +1013,8 @@ void update_world(void) {
                 else                           sprites[i].texture_id = 137; 
 
                 if (sprites[i].tick == 12) {
-                    player_health -= 5; 
+                    player_health -= 5;
+                    play_sound(SND_BARK);
                     //flash_timer = 5;
                     //flash_color_16 = 0xF800;    // RED
                     trigger_flash(0xF800, 5);
@@ -1111,6 +1120,7 @@ void process_player_input(InputState input) {
         if (weapon_frame == 0) {
             if (player_ammo > 0) {
                 player_ammo--; weapon_frame = 30;
+                play_sound(SND_GUN_FIRE1);
                 int32_t det = FX_MUL(plane_x, dir_y) - FX_MUL(dir_x, plane_y);
                 int32_t local_inv_det = (det == 0) ? 0 : FX_DIV(INT2FX(1), det);
                 int closest_target = -1; int32_t closest_dist = 0x7FFFFFFF;
@@ -1135,6 +1145,10 @@ void process_player_input(InputState input) {
                 if (closest_target != -1) {
                     sprites[closest_target].health -= 25;
                     if (sprites[closest_target].health <= 0) { sprites[closest_target].state = 2; sprites[closest_target].tick = 0; }
+                    // Guard Death sound!
+                        if (sprites[closest_target].type == 2) {
+                            play_sound(SND_DIE); // Guard death
+                        }
                 }
             } else weapon_frame = -15; 
         }
@@ -1148,6 +1162,8 @@ void reset_game(void) {
     plane_x = FLT2FX(0.0f); plane_y = FLT2FX(-0.66f);
     player_health = 100; player_ammo = 8; weapon_frame = -30;
     player_angle = 256;
+
+    play_bgm(BGM_SPLASH);
     
     // Clear damage flash state and reset palette
     flash_timer = 0;
@@ -1208,6 +1224,7 @@ int main(void) {
     input_init();
     display_init();
     init_vga_palette();
+    audio_init();
     reset_game();
 
     while (1) {
@@ -1222,12 +1239,16 @@ int main(void) {
             draw_mini_string(21, 105, "ALL RIGHTS RESERVED ID SOFTWARE", 7); 
             
             display_push_frame(frame_buffer_8bit, active_palette, (uint16_t *)hud_buffer);
-            if (input.fire) { reset_game(); game_state = 0; }
+            if (input.fire) { reset_game(); game_state = 0; play_bgm(BGM_EERIE); }
             delay_ms(16); continue;
         }
        
         // Level Complete
         if (game_state == 2) {
+            if (death_fade == 0) {
+                play_bgm(BGM_NONE);
+                play_sound(SND_LEVEL_DONE);
+            }
             if (death_fade < 255) {
                 // Dissolve effect (Using color 2 for a different visual than death)
                 for (int i = 0; i < RENDER_WIDTH * RENDER_HEIGHT; i++) {
@@ -1236,13 +1257,14 @@ int main(void) {
                 death_fade += 10; 
             } else {
                 // Solid screen and text
-                memset(frame_buffer_8bit, 2, RENDER_WIDTH * RENDER_HEIGHT); 
+                memset(frame_buffer_8bit, 2, RENDER_WIDTH * RENDER_HEIGHT);
                 draw_mini_string(52, 50, "LEVEL COMPLETE", 15);
                 draw_mini_string(38, 70, "PRESS OPEN TO RESTART", 15);
             }
             
             // Push to the STM32 SPI/DMA display handler
             display_push_frame(frame_buffer_8bit, active_palette, (uint16_t *)hud_buffer);
+
             
             // Wait for door open key to reset
             if (input.door && death_fade >= 255) { 
@@ -1256,14 +1278,19 @@ int main(void) {
 
         // Death Screen
         if (game_state == 1) {
+            if (death_fade == 0) {
+                play_bgm(BGM_NONE);
+                play_sound(SND_PLAYER_DEATH);
+            }
             if (death_fade < 255) {
                 for (int i = 0; i < RENDER_WIDTH * RENDER_HEIGHT; i++) if (rand() % 100 < 15) frame_buffer_8bit[i] = 40; 
                 death_fade += 10; 
             } else {
-                memset(frame_buffer_8bit, 40, RENDER_WIDTH * RENDER_HEIGHT); 
+                memset(frame_buffer_8bit, 40, RENDER_WIDTH * RENDER_HEIGHT);
                 draw_mini_string(70, 50, "DEATH", 15); draw_mini_string(38, 70, "PRESS OPEN TO RESTART", 15);
             }
             display_push_frame(frame_buffer_8bit, active_palette, (uint16_t *)hud_buffer);
+            
             if (input.door && death_fade >= 255) { reset_game(); game_state = 3; }
             delay_ms(16); continue;
         }
