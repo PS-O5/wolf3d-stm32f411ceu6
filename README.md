@@ -2,7 +2,17 @@
 
 A bare-metal, fully hardware-driven port of id Software's classic *Wolfenstein 3D* for the STM32F411CEU6 ("Black Pill") microcontroller.
 
-This project was built entirely from scratch without an RTOS or standard hardware abstraction layers (HAL). It features a custom fixed-point raycasting engine, raw SPI display drivers, state-locking input fusion for physical D-Pads/Joysticks, and runs incredibly fast within a 96MHz envelope.
+This project was built entirely from scratch without an RTOS or standard hardware abstraction layers (HAL). It features a custom fixed-point raycasting engine, raw SPI display drivers, state-locking input fusion for physical D-Pads/Joysticks, a zero-CPU-overhead 8-bit piezo audio engine and runs incredibly fast within a 96MHz envelope.
+
+> **Current Project Status:** At this time, the engine serves as a highly optimized technical showcase featuring **E1M1 (Episode 1, Map 1)** fully playable from start to finish.
+
+---
+
+## ✨ Key Engine Features
+- **Custom Raycaster:** Highly optimized fixed-point math tailored for the ARM Cortex-M4.
+- **Direct Hardware SPI:** Raw, DMA-assisted display driving to the ST7789 LCD.
+- **8-Bit Piezo Audio Engine:** A custom, non-blocking hardware PWM sound system (TIM4) featuring a dual-layer audio priority system. Background music (BGM) seamlessly pauses for sound effects (SFX) and resumes automatically with 0% CPU overhead.
+- **Input Fusion:** Auto-calibrating, state-locking input handler for physical joysticks and push buttons.
 
 ---
 
@@ -28,9 +38,9 @@ The untouched historical DOS C/ASM source code from id Software, preserved for r
 ## 🛠️ Hardware Requirements
 
 - **MCU:** STM32F411CEU6 "Black Pill" Development Board  
-- **Display:** SPI-based LCD (ST7789 LCD driver)  — see `stm32_port/connections.txt` for wiring diagrams  
-- **Input:** Analog Joystick with a switch or 4-Pin D-Pad. At the moment `Open` action is performed by the on-board Key button 
-- **Programmer:** ST-Link v2  
+- **Display:** SPI-based LCD (ST7789 LCD driver)  — see `stm32_port/connections.txt`
+- **Audio:** Passive Piezo Speaker connected to PB6
+- **Controls:** Analog Joystick / Tactile Push Buttons 
 
 > **Note:** The engine features an automatic Input Fusion system. If an analog joystick is disconnected or broken, the engine will automatically default to D-Pad GPIO inputs.
 
