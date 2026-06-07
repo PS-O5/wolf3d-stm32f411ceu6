@@ -28,7 +28,14 @@ uint16_t hud_buffer[STATUSBAR_H][STATUSBAR_W];
 #define STK_LOAD      (*(volatile uint32_t *)(SYSTICK_BASE + 0x04))
 #define STK_VAL       (*(volatile uint32_t *)(SYSTICK_BASE + 0x08))
 #define SCB_VTOR      (*(volatile uint32_t *)(SCB_BASE + 0x08))
-#define SCB_CPACR     (*(volatile uint32_t *)(SCB_BASE + 0x88)) // <---FPU 
+#define SCB_CPACR     (*(volatile uint32_t *)(SCB_BASE + 0x88)) // <---FPU
+                                                                
+                                                                 
+// --- DWT (CYCLE COUNTER) REGISTERS ---
+#define COREDEBUG_DEMCR (*(volatile uint32_t *)0xE000EDFC)
+#define DWT_CTRL        (*(volatile uint32_t *)0xE0001000)
+#define DWT_CYCCNT      (*(volatile uint32_t *)0xE0001004)
+
 
 // --- CLOCK INIT ---
 #define FLASH_BASE      0x40023C00
@@ -1215,6 +1222,12 @@ int main(void) {
     //BOOT TO 96MHz
     system_clock_96mhz();
 
+    // Enable DWT Cycle Counter for FPS tracking
+    COREDEBUG_DEMCR |= (1 << 24); // TRCENA
+    DWT_CYCCNT = 0;
+    DWT_CTRL |= (1 << 0);         // CYCCNTENA
+
+
     STK_VAL  = 0;
     STK_LOAD = 96000 - 1;
     STK_CTRL = 7;
@@ -1226,6 +1239,9 @@ int main(void) {
     init_vga_palette();
     audio_init();
     reset_game();
+
+    uint32_t last_frame_cycles = DWT_CYCCNT;
+    int current_fps = 0;
 
     while (1) {
         InputState input = input_read();
@@ -1313,6 +1329,21 @@ int main(void) {
             render_palette = active_palette;
             flash_timer--;
         }
+
+        // --- FPS CALCULATION & RENDERING ---
+        uint32_t current_cycles = DWT_CYCCNT;
+        uint32_t delta_cycles = current_cycles - last_frame_cycles;
+        last_frame_cycles = current_cycles;
+        
+        // Prevent division by zero on the very first frame
+        if (delta_cycles > 0) {
+            current_fps = 96000000 / delta_cycles;
+        }
+        
+        // Draw FPS in the top-left corner (Color 15 = White)
+        draw_number(2, 2, current_fps, 15);
+
+
 
         display_push_frame(frame_buffer_8bit, render_palette, (uint16_t *)hud_buffer);
     }

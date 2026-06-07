@@ -16,6 +16,49 @@ This project was built entirely from scratch without an RTOS or standard hardwar
 
 ---
 
+## System Architecture
+
+```mermaid
+graph TD
+    subgraph Input
+        A[ADC: PA1, PA2] -->|Joystick| C(input.c)
+        B[GPIO: PB10, PA0, D-Pad] -->|Buttons| C
+    end
+    
+    C -->|InputState| D(main.c : Game Logic)
+    
+    subgraph Engine
+        D --> E[Raycaster]
+        E --> F[8-bit Framebuffer]
+        E --> G[Z-Buffer & Sprites]
+    end
+    
+    subgraph Output
+        F -->|Line-by-Line 2x Upscale| H[DMA2 Stream 3]
+        H -->|16-bit RGB565| I[SPI1 @ 48MHz]
+        I --> J[ST7789 Display]
+        D -->|BGM & SFX| K[TIM4 PWM : PB6]
+    end
+```
+
+---
+
+## Memory Footprint (STM32F411CEU6)
+
+The game runs entirely bare-metal and is highly optimized to fit within the constraints of the BlackPill's 512 KB Flash and 128 KB SRAM:
+
+```text
+Memory region      Used Size   Region Size   %age Used
+       FLASH:       338.7 KB        512 KB      64.60%
+        SRAM:        85.1 KB        128 KB      64.94%
+
+   text    data     bss     dec     hex filename
+ 338376     324   84800  423500   6764c wolf3d_stm32f411ceu6.elf
+```
+
+---
+
+
 ## 🗂️ Repository Structure
 
 ### `stm32_port/`
@@ -43,6 +86,27 @@ The untouched historical DOS C/ASM source code from id Software, preserved for r
 - **Controls:** Analog Joystick / Tactile Push Buttons 
 
 > **Note:** The engine features an automatic Input Fusion system. If an analog joystick is disconnected or broken, the engine will automatically default to D-Pad GPIO inputs.
+
+---
+
+## Hardware Wiring
+
+| Signal         | STM32 Pin | Direction | Peripherals & Notes              |
+|----------------|-----------|-----------|----------------------------------|
+| **SPI_SCK** | PA5       | OUT       | SPI1 (AF5) - ST7789 Clock        |
+| **SPI_MOSI** | PA7       | OUT       | SPI1 (AF5) - ST7789 Data         |
+| **LCD_CS** | PA4       | OUT       | Active Low                       |
+| **LCD_DC** | PB0       | OUT       | Data/Command Select              |
+| **LCD_RST** | PB2       | OUT       | Active Low Hardware Reset        |
+| **AUDIO_PWM** | PB6       | OUT       | TIM4_CH1 (AF2) - Piezo Buzzer    |
+| **JOY_Y** | PA1       | IN (ADC)  | ADC1_CH1                         |
+| **JOY_X** | PA2       | IN (ADC)  | ADC1_CH2                         |
+| **BTN_FIRE** | PB10      | IN        | Internal Pull-up, Active Low     |
+| **BTN_DOOR** | PA0       | IN        | Internal Pull-up, Active Low     |
+| **DPAD_UP** | PB12      | IN        | Internal Pull-up, Active Low     |
+| **DPAD_DOWN** | PB13      | IN        | Internal Pull-up, Active Low     |
+| **DPAD_LEFT** | PB14      | IN        | Internal Pull-up, Active Low     |
+| **DPAD_RIGHT** | PB15      | IN        | Internal Pull-up, Active Low     |
 
 ---
 
