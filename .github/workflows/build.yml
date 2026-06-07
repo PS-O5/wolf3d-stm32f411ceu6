@@ -1,0 +1,49 @@
+name: Build
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+
+  simulator:
+    name: PC Simulator (SDL2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc libsdl2-dev
+        
+      - name: Build Simulator
+        run: |
+          cd simulator
+          gcc main.c -o wolf_test -O2 -lm $(sdl2-config --cflags --libs)
+          
+      - name: Upload Simulator Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wolf-simulator-linux
+          path: simulator/wolf_test
+
+  stm32:
+    name: STM32 Port (arm-none-eabi)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi make
+        
+      - name: Build STM32 Port
+        run: |
+          cd stm32_port
+          make
+          
+      - name: Upload STM32 Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: wolf3d-stm32-bin
+          path: stm32_port/wolf3d_stm32f411ceu6.bin
