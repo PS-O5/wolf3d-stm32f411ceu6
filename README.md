@@ -1,3 +1,5 @@
+![Build Status](https://github.com/PS_O5/wolf3d-stm32f411ceu6/actions/workflows/build.yml/badge.svg)
+
 # Wolfenstein 3D - Bare Metal STM32F411CEU6 Port
 
 A bare-metal, fully hardware-driven port of id Software's classic *Wolfenstein 3D* for the STM32F411CEU6 ("Black Pill") microcontroller.
