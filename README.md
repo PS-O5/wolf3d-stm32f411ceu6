@@ -10,6 +10,18 @@ This project was built entirely from scratch without an RTOS or standard hardwar
 
 ---
 
+---
+
+### 🕹️ Live Hardware Demonstration
+
+![Bare-Metal Gameplay Teaser](Wolf.gif)
+
+*Wrote direct register-level configurations to eliminate HAL bloat and maximize SPI display throughput.*
+
+[► Watch the full system demonstration with hardware-accelerated audio on YouTube](https://www.youtube.com/watch?v=Yfi41pSZLiA)
+
+---
+
 ## ✨ Key Engine Features
 - **Custom Raycaster:** Highly optimized fixed-point math tailored for the ARM Cortex-M4.
 - **Direct Hardware SPI:** Raw, DMA-assisted display driving to the ST7789 LCD.
