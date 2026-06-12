@@ -10,8 +10,6 @@ This project was built entirely from scratch without an RTOS or standard hardwar
 
 ---
 
----
-
 ### 🕹️ Live Hardware Demonstration
 
 ![Bare-Metal Gameplay Teaser](Wolf.gif)
